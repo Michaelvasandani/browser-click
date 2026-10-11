@@ -23,9 +23,10 @@ const MIN_READABLE_CHARS = 200;
  */
 export function extractPageContext(doc: Document): PageContext {
   let text = readableText(doc);
-  if (text.length < MIN_READABLE_CHARS) text = visibleText(doc);
+  let complete = true;
+  if (text.length < MIN_READABLE_CHARS) ({ text, complete } = visibleText(doc));
 
-  let truncated = false;
+  let truncated = !complete;
   if (text.length > MAX_PAGE_TEXT_CHARS) {
     truncated = true;
     text = text.slice(0, MAX_PAGE_TEXT_CHARS);
@@ -62,14 +63,23 @@ const BLOCK_TAGS = new Set([
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
 
-/** The text a reader can see, roughly as `innerText` would give it. */
-function visibleText(doc: Document): string {
+/**
+ * The text a reader can see, roughly as `innerText` would give it. Stops once
+ * it has more than enough; `complete` is false when it stopped early.
+ */
+function visibleText(doc: Document): { text: string; complete: boolean } {
   const parts: string[] = [];
   const view = doc.defaultView;
+  // Enough raw text to fill the cap after whitespace is collapsed, and to know it overflowed.
+  const enough = MAX_PAGE_TEXT_CHARS * 2;
+  let length = 0;
 
   const walk = (node: Node) => {
+    if (length > enough) return;
     if (node.nodeType === TEXT_NODE) {
-      parts.push(node.textContent ?? '');
+      const text = node.textContent ?? '';
+      parts.push(text);
+      length += text.length;
       return;
     }
     if (node.nodeType !== ELEMENT_NODE) return;
@@ -83,7 +93,7 @@ function visibleText(doc: Document): string {
   };
 
   if (doc.body) walk(doc.body);
-  return normalize(parts.join(''));
+  return { text: normalize(parts.join('')), complete: length <= enough };
 }
 
 function isHidden(element: Element, view: Window | null): boolean {

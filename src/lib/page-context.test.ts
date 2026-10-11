@@ -97,3 +97,14 @@ describe('extractPageContext', () => {
     expect(extractPageContext(doc)).toEqual({ title: '', url: 'https://example.com/post', text: '', truncated: false });
   });
 });
+
+describe('extractPageContext: visible-text fallback over the cap', () => {
+  it('stops reading at the cap and says the text was truncated', () => {
+    const cells = Array.from({ length: 6000 }, (_, i) => `<div><span>Cell ${i} value ${i * 7}</span></div>`).join('');
+    const doc = makeDocument(`<head><title>Grid</title></head><body>${cells}</body>`);
+    const context = extractPageContext(doc);
+    expect(context.truncated).toBe(true);
+    expect(context.text.length).toBeLessThanOrEqual(MAX_PAGE_TEXT_CHARS);
+    expect(context.text).toContain('Cell 0 value 0');
+  });
+});

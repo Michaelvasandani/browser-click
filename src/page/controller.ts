@@ -45,44 +45,67 @@ export function startPage() {
       if (panelWasVisible) panel?.show();
     };
     try {
-      if (panelWasVisible) {
-        // Keep the Panel out of the still.
-        panel!.hide();
-        await nextFrames(2);
-      }
-      const capture = await requestCapture();
-      if (!capture.ok) {
-        restorePanel();
-        if (panel && !fresh) {
-          resumeAfterAccessLost = true;
-          panel.store.setNotice(ACCESS_LOST_NOTICE);
-        }
-        return;
-      }
-      const image = await runSelectionMode(capture.dataUrl);
-      if (!image) {
-        restorePanel();
-        return;
-      }
-      // Read per Selection, so one made after in-page navigation carries the new page.
-      const pageContext = extractPageContext(document);
-      if (fresh || !panel) {
-        closePanel();
-        panel = new PanelHost(image, pageContext, settings!, portModelClient, {
-          onClose: closePanel,
-          onAddSelection: addSelection,
-        });
-      } else {
-        resumeAfterAccessLost = false;
-        panel.store.setNotice(null);
-        panel.store.addSelection(image, pageContext);
-        panel.show();
-        panel.focusQuestion();
-      }
+      await runSelection(fresh, settings, panelWasVisible, restorePanel);
+    } catch (error) {
+      // Never leave the Panel hidden with its Conversation inside.
+      restorePanel();
+      panel?.store.setNotice(`Couldn't make that Selection: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       selecting = false;
     }
   }
+
+  async function runSelection(
+    fresh: boolean,
+    settings: PageSettings | null,
+    panelWasVisible: boolean,
+    restorePanel: () => void,
+  ) {
+    if (panelWasVisible) {
+      // Keep the Panel out of the still.
+      panel!.hide();
+      await nextFrames(2);
+    }
+    const capture = await requestCapture();
+    if (!capture.ok) {
+      restorePanel();
+      if (panel && !fresh) {
+        resumeAfterAccessLost = true;
+        panel.store.setNotice(ACCESS_LOST_NOTICE);
+      }
+      return;
+    }
+    const image = await runSelectionMode(capture.dataUrl);
+    if (!image) {
+      restorePanel();
+      return;
+    }
+    // Read per Selection, so one made after in-page navigation carries the new page.
+    const pageContext = extractPageContext(document);
+    if (fresh || !panel) {
+      // Only the toolbar click carries settings; an "Add selection" whose
+      // Panel was closed meanwhile has nowhere to go.
+      if (!settings) return;
+      closePanel();
+      panel = new PanelHost(image, pageContext, settings, portModelClient, {
+        onClose: closePanel,
+        onAddSelection: addSelection,
+      });
+    } else {
+      resumeAfterAccessLost = false;
+      panel.store.setNotice(null);
+      panel.store.addSelection(image, pageContext);
+      panel.show();
+      panel.focusQuestion();
+    }
+  }
+
+  return {
+    /** Remove everything this copy of the page code added to the page. */
+    dispose() {
+      closePanel();
+    },
+  };
 }
 
 async function requestCapture(): Promise<CaptureResponse> {

@@ -1,11 +1,4 @@
-import {
-  Conversation,
-  ModelError,
-  type ConversationEvent,
-  type ModelClient,
-  type Source,
-} from '@/lib/conversation';
-import { describeError } from '@/lib/error-messages';
+import { Conversation, type ConversationEvent, type ModelClient, type Source } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
 import type { CapturedImage } from './overlay';
@@ -116,13 +109,8 @@ export class PanelStore {
     try {
       await action();
     } catch (error) {
-      const message =
-        error instanceof ModelError
-          ? describeError(error.kind, error.message)
-          : error instanceof Error
-            ? error.message
-            : String(error);
-      this.updateLastTurn({ status: 'error', error: message, searching: false });
+      // The Conversation reports model failures as events; this is a last resort.
+      this.updateLastTurn({ status: 'error', error: error instanceof Error ? error.message : String(error), searching: false });
     } finally {
       this.update({ busy: false });
     }

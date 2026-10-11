@@ -51,7 +51,11 @@ async function onActionClicked(tab: Browser.tabs.Tab) {
     fresh: true,
     settings: { model: settings.model, webSearch: settings.webSearch },
   };
-  await browser.tabs.sendMessage(tab.id, message);
+  try {
+    await browser.tabs.sendMessage(tab.id, message);
+  } catch (error) {
+    console.warn('browser-click: the page code did not answer', error);
+  }
 }
 
 /** Pops up a short "can't run here" note from the toolbar icon. */

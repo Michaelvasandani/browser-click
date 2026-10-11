@@ -602,3 +602,43 @@ describe('Conversation: errors and refusals', () => {
     expect(model.requests).toHaveLength(1);
   });
 });
+
+describe('Conversation: unexpected failures', () => {
+  it('treats an unexpected failure like an API error: reported, retryable, Selections kept', async () => {
+    const { model, conversation, events } = setup();
+    model.respond(new Error('Extension context invalidated.'));
+    model.respond(response([text('ok')]));
+    const id = conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+
+    expect(events.at(-1)).toEqual({
+      type: 'error',
+      kind: 'api',
+      message: 'Extension context invalidated.',
+      retryable: true,
+    });
+    expect(conversation.pendingSelectionIds).toEqual([id]);
+    expect(conversation.canRetry).toBe(true);
+    await conversation.retry();
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('does not commit a turn that is still paused after the last allowed continuation', async () => {
+    const { model, conversation, events } = setup({ webSearch: true });
+    const paused = [
+      { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'q' } },
+    ] as unknown as Anthropic.ContentBlock[];
+    for (let i = 0; i < 4; i++) model.respond(response(paused, { stopReason: 'pause_turn' }));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+
+    expect(model.requests).toHaveLength(4);
+    expect(events.at(-1)).toMatchObject({ type: 'error', kind: 'api', retryable: true });
+    expect(events).not.toContainEqual({ type: 'done' });
+    expect(conversation.canRetry).toBe(true);
+
+    model.respond(response([text('ok')]));
+    await conversation.ask('Something else?');
+    expect(model.lastRequest.messages.map((m) => m.role)).toEqual(['user']);
+  });
+});

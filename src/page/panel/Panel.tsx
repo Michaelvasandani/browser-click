@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -155,7 +156,9 @@ function openOptions() {
   void browser.runtime.sendMessage(message).catch(() => {});
 }
 
-function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
+// Memoised: while an answer streams, only the turn that changed re-renders.
+const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
+  const sources = webSources(turn);
   return (
     <article className="turn" data-status={turn.status}>
       {turn.selections.length > 0 && <Thumbnails selections={turn.selections} />}
@@ -171,16 +174,16 @@ function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
           {turn.searching ? 'Searching the web…' : 'Thinking'}
         </p>
       )}
-      {webSources(turn).length > 0 && (
+      {sources.length > 0 && (
         <div className="sources">
           <p className="sources-label">Sources</p>
           <ol>
-            {webSources(turn).map((source) => (
+            {sources.map((source) => (
               <li key={source.url}>
                 <a href={source.url} target="_blank" rel="noopener noreferrer" title={source.url}>
                   {source.title}
                 </a>
-                <span className="host">{hostOf(source.url)}</span>
+                <span className="host">{source.host}</span>
               </li>
             ))}
           </ol>
@@ -206,24 +209,17 @@ function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
       )}
     </article>
   );
-}
+});
 
 /** Sources with web links only: anything else (javascript:, data:…) is never linked. */
 function webSources(turn: TurnView) {
-  return turn.sources.filter((source) => {
+  return turn.sources.flatMap((source) => {
     try {
-      const { protocol } = new URL(source.url);
-      return protocol === 'https:' || protocol === 'http:';
+      const url = new URL(source.url);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return [];
+      return [{ ...source, host: url.hostname.replace(/^www\./, '') }];
     } catch {
-      return false;
+      return [];
     }
   });
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return '';
-  }
 }

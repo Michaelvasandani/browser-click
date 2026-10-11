@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { describeError, REFUSAL_MESSAGE } from './error-messages';
+import { describeError, REFUSAL_MESSAGE, UNFINISHED_MESSAGE } from './error-messages';
 import { MAX_PAGE_TEXT_CHARS, type PageContext } from './page-context';
 import type { ModelId } from './settings';
 import { webSearchTool } from './web-search';
@@ -204,9 +204,14 @@ export class Conversation {
         answers.push(final);
         if (final.stop_reason !== 'pause_turn' || continuation >= MAX_CONTINUATIONS) break;
       }
-    } catch (error) {
+    } catch (caught) {
       if (!controller.signal.aborted) {
-        if (!(error instanceof ModelError)) throw error;
+        // Anything else (such as the extension being reloaded under the page) is
+        // reported the same way, so the question can still be retried.
+        const error =
+          caught instanceof ModelError
+            ? caught
+            : new ModelError('api', caught instanceof Error ? caught.message : String(caught));
         giveBack();
         this.emit({ type: 'error', kind: error.kind, message: describeError(error.kind, error.message), retryable: true });
         return;
@@ -227,6 +232,12 @@ export class Conversation {
         },
       ]);
       this.emit({ type: 'stopped' });
+      return;
+    }
+    if (answers.at(-1)?.stop_reason === 'pause_turn') {
+      // Still unfinished after the allowed continuations: don't keep half a turn.
+      giveBack();
+      this.emit({ type: 'error', kind: 'api', message: UNFINISHED_MESSAGE, retryable: true });
       return;
     }
     if (answers.at(-1)?.stop_reason === 'refusal') {

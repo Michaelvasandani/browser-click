@@ -17,10 +17,12 @@ const MAX_IMAGE_BYTES = 3_500_000;
 const OVERLAY_CSS = `
   :host { all: initial; }
   .overlay {
-    position: fixed; inset: 0; z-index: 2147483647;
+    position: fixed; inset: 0; z-index: 2147483647; overflow: hidden;
     cursor: crosshair; user-select: none; touch-action: none;
   }
-  .still { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  /* Sized to the whole window (set inline), like the capture, so it lines up with
+     the page even where a classic scrollbar takes some of the width. */
+  .still { position: absolute; left: 0; top: 0; display: block; max-width: none; }
   .shade { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.25); }
   .rect {
     position: absolute; display: none;
@@ -68,15 +70,18 @@ export async function runSelectionMode(stillDataUrl: string): Promise<CapturedIm
   return new Promise((resolve) => {
     let start: Point | null = null;
 
-    const viewport = () => ({ width: overlay.clientWidth, height: overlay.clientHeight });
+    // The capture covers the whole window, scrollbars included.
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    still.style.width = `${viewport.width}px`;
+    still.style.height = `${viewport.height}px`;
     const cropFor = (end: Point) =>
       start &&
       computeCrop({
         start,
         end,
-        viewport: viewport(),
+        viewport,
         // Measured from the still itself, so browser zoom is accounted for.
-        devicePixelRatio: still.naturalWidth / viewport().width,
+        devicePixelRatio: still.naturalWidth / viewport.width,
       });
 
     const blockScroll = (event: Event) => event.preventDefault();

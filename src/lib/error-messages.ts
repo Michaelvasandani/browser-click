@@ -18,3 +18,6 @@ export function describeError(kind: ModelErrorKind, apiMessage: string): string 
 
 export const REFUSAL_MESSAGE =
   'Claude declined to answer this. You can rephrase your question or select something else.';
+
+export const UNFINISHED_MESSAGE =
+  'Claude needed too many search steps and stopped before finishing. Retry, or ask a narrower question.';
