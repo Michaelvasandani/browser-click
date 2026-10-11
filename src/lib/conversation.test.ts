@@ -302,3 +302,74 @@ describe('Conversation: follow-up questions', () => {
     expect(prefix(second!)).toBe(prefix(first!));
   });
 });
+
+describe('Conversation: adding a Selection', () => {
+  const page = (url: string, body: string): PageContext => ({ title: `Title of ${url}`, url, text: body, truncated: false });
+
+  async function afterFirstAnswer() {
+    const harness = setup();
+    harness.model.respond(response([text('first answer')]));
+    harness.conversation.addSelection({ ...selection('Zmlyc3Q='), pageContext: page('https://a.test/1', 'Text of page one.') });
+    await harness.conversation.ask('First?');
+    return harness;
+  }
+
+  it('sends an added Selection with the next question, not on its own', async () => {
+    const { model, conversation } = await afterFirstAnswer();
+    const id = conversation.addSelection({ ...selection('c2Vjb25k'), pageContext: page('https://a.test/1', 'Text of page one.') });
+    expect(model.requests).toHaveLength(1);
+    expect(conversation.pendingSelectionIds).toEqual([id]);
+
+    model.respond(response([text('second answer')]));
+    await conversation.ask('How does this relate to the first?');
+    const content = contentOf(model.lastRequest, 2);
+    expect(content).toContainEqual({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'c2Vjb25k' } });
+    expect(content.at(-1)).toEqual({ type: 'text', text: 'How does this relate to the first?' });
+    expect(conversation.pendingSelectionIds).toEqual([]);
+  });
+
+  it('carries the Page Context captured when the added Selection was made', async () => {
+    const { model, conversation } = await afterFirstAnswer();
+    // e.g. YouTube moved to the next video without reloading
+    conversation.addSelection({ ...selection(), pageContext: page('https://a.test/2', 'Text of page two.') });
+    model.respond(response([text('ok')]));
+    await conversation.ask('And this?');
+
+    const sent = contentOf(model.lastRequest, 2)
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('\n');
+    expect(sent).toContain('https://a.test/2');
+    expect(sent).toContain('Title of https://a.test/2');
+    expect(sent).toContain('Text of page two.');
+    expect(sent).not.toContain('Text of page one.');
+  });
+
+  it('does not repeat page text already sent for an earlier Selection from the same page', async () => {
+    const { model, conversation } = await afterFirstAnswer();
+    conversation.addSelection({ ...selection(), pageContext: page('https://a.test/1', 'Text of page one.') });
+    model.respond(response([text('ok')]));
+    await conversation.ask('And this?');
+
+    const sent = contentOf(model.lastRequest, 2)
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('\n');
+    expect(sent).toContain('https://a.test/1');
+    expect(sent).toMatch(/same page as Selection 1/i);
+    expect(sent).not.toContain('Text of page one.');
+  });
+
+  it('sends several added Selections together, each with its own Page Context', async () => {
+    const { model, conversation, events } = await afterFirstAnswer();
+    const a = conversation.addSelection({ ...selection('YQ=='), pageContext: page('https://a.test/2', 'Two.') });
+    const b = conversation.addSelection({ ...selection('Yg=='), pageContext: page('https://a.test/3', 'Three.') });
+    model.respond(response([text('ok')]));
+    await conversation.ask('Compare these.');
+
+    const content = contentOf(model.lastRequest, 2);
+    expect(content.filter((block) => block.type === 'image')).toHaveLength(2);
+    const sent = content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+    expect(sent).toContain('Two.');
+    expect(sent).toContain('Three.');
+    expect(events).toContainEqual({ type: 'turn-started', question: 'Compare these.', selectionIds: [a, b] });
+  });
+});

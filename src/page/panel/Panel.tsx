@@ -14,9 +14,10 @@ import { Answer } from './Answer';
 export interface PanelProps {
   store: PanelStore;
   onClose: () => void;
+  onAddSelection: () => void;
 }
 
-export function Panel({ store, onClose }: PanelProps) {
+export function Panel({ store, onClose, onAddSelection }: PanelProps) {
   const state = useSyncExternalStore(store.subscribe, store.getState);
   const [question, setQuestion] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -67,7 +68,17 @@ export function Panel({ store, onClose }: PanelProps) {
         {state.turns.map((turn) => (
           <Turn key={turn.id} turn={turn} />
         ))}
-        {state.pending.length > 0 && <Thumbnails selections={state.pending} />}
+        {state.pending.length > 0 && (
+          <div className="pending">
+            {state.turns.length > 0 && <p className="pending-label">Added to your next question</p>}
+            <Thumbnails selections={state.pending} />
+          </div>
+        )}
+        {state.notice && (
+          <p className="error" role="alert">
+            {state.notice}
+          </p>
+        )}
       </div>
 
       <form className="composer" onSubmit={submit}>
@@ -81,6 +92,14 @@ export function Panel({ store, onClose }: PanelProps) {
           onKeyDown={onKeyDown}
         />
         <div className="actions">
+          <button
+            type="button"
+            className="secondary"
+            title="Select another part of the page to ask about"
+            onClick={onAddSelection}
+          >
+            Add selection
+          </button>
           {state.pending.length > 0 && (
             <button type="button" className="secondary" disabled={state.busy} onClick={() => void store.explain()}>
               Explain this

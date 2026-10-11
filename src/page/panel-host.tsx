@@ -15,6 +15,11 @@ const SHADOW_MODE: ShadowRootMode = import.meta.env.MODE === 'e2e' ? 'open' : 'c
 const ESTIMATED_PANEL_HEIGHT = 420;
 const VIEWPORT_MARGIN = 12;
 
+export interface PanelCallbacks {
+  onClose: () => void;
+  onAddSelection: () => void;
+}
+
 /**
  * The Panel's element on the page: a fixed-position host whose Shadow DOM
  * keeps the page's styles out of the React UI.
@@ -22,6 +27,7 @@ const VIEWPORT_MARGIN = 12;
 export class PanelHost {
   private host: HTMLElement;
   private frame: HTMLDivElement;
+  private shadow: ShadowRoot;
   private root: Root;
   readonly store: PanelStore;
 
@@ -30,11 +36,12 @@ export class PanelHost {
     pageContext: PageContext,
     settings: PageSettings,
     client: ModelClient,
-    onClose: () => void,
+    callbacks: PanelCallbacks,
   ) {
     this.store = new PanelStore(firstSelection, pageContext, settings, client);
     this.host = document.createElement('browser-click-panel');
     const shadow = this.host.attachShadow({ mode: SHADOW_MODE });
+    this.shadow = shadow;
     const style = document.createElement('style');
     style.textContent = panelCss;
     this.frame = document.createElement('div');
@@ -50,7 +57,7 @@ export class PanelHost {
 
     document.documentElement.append(this.host);
     this.root = createRoot(this.frame);
-    this.root.render(<Panel store={this.store} onClose={onClose} />);
+    this.root.render(<Panel store={this.store} {...callbacks} />);
   }
 
   /** Place the Panel, letting it grow no further than the bottom of the viewport. */
@@ -70,6 +77,10 @@ export class PanelHost {
 
   show() {
     this.host.style.display = '';
+  }
+
+  focusQuestion() {
+    this.shadow.querySelector<HTMLTextAreaElement>('.question')?.focus();
   }
 
   destroy() {

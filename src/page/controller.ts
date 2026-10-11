@@ -10,24 +10,40 @@ import { portModelClient } from './model-port';
 import { runSelectionMode } from './overlay';
 import { PanelHost } from './panel-host';
 
+const ACCESS_LOST_NOTICE =
+  'browser-click lost access to this tab. Click its toolbar icon to add your Selection to this Conversation.';
+
 /** Wires the page code together: Selection Mode, the Panel and the Background. */
 export function startPage() {
   let panel: PanelHost | null = null;
   let selecting = false;
+  // Set when "Add selection" could not capture the tab. The next toolbar click
+  // (which restores access) then adds to this Conversation instead of replacing it.
+  let resumeAfterAccessLost = false;
 
   browser.runtime.onMessage.addListener((message: BackgroundToPageMessage) => {
-    if (message.type === 'begin-selection') void beginSelection(message.fresh, message.settings);
+    if (message.type !== 'begin-selection') return;
+    const fresh = message.fresh && !(resumeAfterAccessLost && panel);
+    void beginSelection(fresh, message.settings);
   });
 
   function closePanel() {
     panel?.destroy();
     panel = null;
+    resumeAfterAccessLost = false;
   }
 
-  async function beginSelection(fresh: boolean, settings: PageSettings) {
+  function addSelection() {
+    if (panel) void beginSelection(false, null);
+  }
+
+  async function beginSelection(fresh: boolean, settings: PageSettings | null) {
     if (selecting) return;
     selecting = true;
     const panelWasVisible = panel?.visible ?? false;
+    const restorePanel = () => {
+      if (panelWasVisible) panel?.show();
+    };
     try {
       if (panelWasVisible) {
         // Keep the Panel out of the still.
@@ -36,22 +52,32 @@ export function startPage() {
       }
       const capture = await requestCapture();
       if (!capture.ok) {
-        if (panelWasVisible) panel!.show();
+        restorePanel();
+        if (panel && !fresh) {
+          resumeAfterAccessLost = true;
+          panel.store.setNotice(ACCESS_LOST_NOTICE);
+        }
         return;
       }
       const image = await runSelectionMode(capture.dataUrl);
       if (!image) {
-        if (panelWasVisible) panel!.show();
+        restorePanel();
         return;
       }
       // Read per Selection, so one made after in-page navigation carries the new page.
       const pageContext = extractPageContext(document);
       if (fresh || !panel) {
         closePanel();
-        panel = new PanelHost(image, pageContext, settings, portModelClient, closePanel);
+        panel = new PanelHost(image, pageContext, settings!, portModelClient, {
+          onClose: closePanel,
+          onAddSelection: addSelection,
+        });
       } else {
+        resumeAfterAccessLost = false;
+        panel.store.setNotice(null);
         panel.store.addSelection(image, pageContext);
         panel.show();
+        panel.focusQuestion();
       }
     } finally {
       selecting = false;
@@ -59,9 +85,14 @@ export function startPage() {
   }
 }
 
-function requestCapture(): Promise<CaptureResponse> {
+async function requestCapture(): Promise<CaptureResponse> {
   const message: PageToBackgroundMessage = { type: 'capture' };
-  return browser.runtime.sendMessage(message);
+  try {
+    return await browser.runtime.sendMessage(message);
+  } catch (error) {
+    // The extension was reloaded or updated since this page code was injected.
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function nextFrames(count: number) {

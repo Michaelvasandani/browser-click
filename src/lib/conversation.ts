@@ -79,6 +79,8 @@ export class Conversation {
   private readonly options: ConversationOptions;
   private readonly history: Anthropic.MessageParam[] = [];
   private pending: PendingSelection[] = [];
+  /** Selections whose page text is already in the history the model sees. */
+  private sentPages: { id: number; page: PageContext }[] = [];
   private nextSelectionId = 1;
   private controller: AbortController | null = null;
 
@@ -116,7 +118,12 @@ export class Conversation {
     if (this.busy) throw new Error('An answer is already being generated.');
     const selections = this.pending;
     this.pending = [];
-    const userMessage: Anthropic.MessageParam = { role: 'user', content: this.userContent(question, selections) };
+    const { content, sentPages } = this.userContent(question, selections);
+    const userMessage: Anthropic.MessageParam = { role: 'user', content };
+    const commit = (assistant: Anthropic.MessageParam) => {
+      this.history.push(userMessage, assistant);
+      this.sentPages = sentPages;
+    };
     this.emit({ type: 'turn-started', question, selectionIds: selections.map((s) => s.id) });
 
     const controller = new AbortController();
@@ -145,28 +152,32 @@ export class Conversation {
     if (controller.signal.aborted) {
       // Keep the stopped exchange so follow-ups make sense. Only its text is
       // kept: the partial blocks around it were never completed by the API.
-      this.history.push(userMessage, {
+      commit({
         role: 'assistant',
         content: [{ type: 'text', text: partialText.trim() ? partialText : STOPPED_PLACEHOLDER }],
       });
       this.emit({ type: 'stopped' });
       return;
     }
-    if (final) this.history.push(userMessage, { role: 'assistant', content: final.content });
+    if (final) commit({ role: 'assistant', content: final.content });
     this.emit({ type: 'done' });
   }
 
-  private userContent(question: string, selections: PendingSelection[]): Anthropic.ContentBlockParam[] {
+  private userContent(question: string, selections: PendingSelection[]) {
     const content: Anthropic.ContentBlockParam[] = [];
+    const sentPages = [...this.sentPages];
     for (const selection of selections) {
-      content.push({ type: 'text', text: describeSelection(selection.id, selection.pageContext) });
+      const page = selection.pageContext;
+      const samePage = page && sentPages.find((sent) => samePageContext(sent.page, page));
+      content.push({ type: 'text', text: describeSelection(selection.id, page, samePage?.id) });
+      if (page && !samePage) sentPages.push({ id: selection.id, page });
       content.push({
         type: 'image',
         source: { type: 'base64', media_type: selection.image.mediaType, data: selection.image.data },
       });
     }
     content.push({ type: 'text', text: question });
-    return content;
+    return { content, sentPages };
   }
 
   private buildRequest(userMessage: Anthropic.MessageParam): StreamParams {
@@ -187,10 +198,15 @@ export class Conversation {
   }
 }
 
-function describeSelection(id: number, page: PageContext | undefined): string {
+const samePageContext = (a: PageContext, b: PageContext) =>
+  a.url === b.url && a.title === b.title && a.text === b.text;
+
+function describeSelection(id: number, page: PageContext | undefined, samePageAs?: number): string {
   if (!page) return `Selection ${id}:`;
   const lines = [`Selection ${id}, from this page:`, `Title: ${page.title || '(none)'}`, `URL: ${page.url}`];
-  if (page.text) {
+  if (samePageAs !== undefined) {
+    lines.push(`(Same page as Selection ${samePageAs}; its page text is above.)`);
+  } else if (page.text) {
     lines.push('<page_text>', page.text, '</page_text>');
     if (page.truncated) {
       lines.push(`(The page text was cut off after ${MAX_PAGE_TEXT_CHARS.toLocaleString('en-US')} characters.)`);

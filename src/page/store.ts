@@ -27,6 +27,8 @@ export interface PanelState {
   turns: TurnView[];
   /** True while an answer is being generated. */
   busy: boolean;
+  /** A message about the Panel itself, such as lost access to the tab. */
+  notice: string | null;
 }
 
 /**
@@ -34,7 +36,7 @@ export interface PanelState {
  * via useSyncExternalStore; the Conversation's events are folded in here.
  */
 export class PanelStore {
-  private state: PanelState = { pending: [], turns: [], busy: false };
+  private state: PanelState = { pending: [], turns: [], busy: false, notice: null };
   private listeners = new Set<() => void>();
   private selections = new Map<number, SelectionView>();
   private nextTurnId = 1;
@@ -69,6 +71,10 @@ export class PanelStore {
     });
     this.selections.set(view.id, view);
     this.update({ pending: [...this.state.pending, view] });
+  }
+
+  setNotice(notice: string | null) {
+    this.update({ notice });
   }
 
   ask(question: string) {
