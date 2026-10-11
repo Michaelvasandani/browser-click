@@ -47,7 +47,9 @@ export type ConversationEvent =
   /** More answer text arrived. */
   | { type: 'text'; text: string }
   /** The answer is complete. */
-  | { type: 'done' };
+  | { type: 'done' }
+  /** The user stopped the answer; the text received so far stands. */
+  | { type: 'stopped' };
 
 export interface ConversationOptions {
   client: ModelClient;
@@ -66,6 +68,9 @@ export const SYSTEM_PROMPT = `You help a reader who got stuck on part of a web p
 
 const MAX_TOKENS = 16000;
 
+/** Stands in for an answer the user stopped before any text arrived. */
+const STOPPED_PLACEHOLDER = '(The reader stopped this answer before it began.)';
+
 interface PendingSelection extends SelectionInput {
   id: number;
 }
@@ -75,6 +80,7 @@ export class Conversation {
   private readonly history: Anthropic.MessageParam[] = [];
   private pending: PendingSelection[] = [];
   private nextSelectionId = 1;
+  private controller: AbortController | null = null;
 
   constructor(options: ConversationOptions) {
     this.options = options;
@@ -92,27 +98,59 @@ export class Conversation {
     return this.pending.map((s) => s.id);
   }
 
+  /** True while an answer is being generated. */
+  get busy(): boolean {
+    return this.controller !== null;
+  }
+
+  /** Stop the answer being generated, keeping what has arrived. */
+  stop() {
+    this.controller?.abort();
+  }
+
   explain(): Promise<void> {
     return this.ask(EXPLAIN_QUESTION);
   }
 
   async ask(question: string): Promise<void> {
+    if (this.busy) throw new Error('An answer is already being generated.');
     const selections = this.pending;
     this.pending = [];
     const userMessage: Anthropic.MessageParam = { role: 'user', content: this.userContent(question, selections) };
     this.emit({ type: 'turn-started', question, selectionIds: selections.map((s) => s.id) });
 
     const controller = new AbortController();
+    this.controller = controller;
     let final: Anthropic.Message | undefined;
-    for await (const item of this.options.client.stream(this.buildRequest(userMessage), controller.signal)) {
-      if (item.type === 'message') {
-        final = item.message;
-        continue;
+    let partialText = '';
+    try {
+      for await (const item of this.options.client.stream(this.buildRequest(userMessage), controller.signal)) {
+        if (controller.signal.aborted) break;
+        if (item.type === 'message') {
+          final = item.message;
+          continue;
+        }
+        const { event } = item;
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          partialText += event.delta.text;
+          this.emit({ type: 'text', text: event.delta.text });
+        }
       }
-      const { event } = item;
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        this.emit({ type: 'text', text: event.delta.text });
-      }
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      this.controller = null;
+    }
+
+    if (controller.signal.aborted) {
+      // Keep the stopped exchange so follow-ups make sense. Only its text is
+      // kept: the partial blocks around it were never completed by the API.
+      this.history.push(userMessage, {
+        role: 'assistant',
+        content: [{ type: 'text', text: partialText.trim() ? partialText : STOPPED_PLACEHOLDER }],
+      });
+      this.emit({ type: 'stopped' });
+      return;
     }
     if (final) this.history.push(userMessage, { role: 'assistant', content: final.content });
     this.emit({ type: 'done' });

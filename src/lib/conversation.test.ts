@@ -1,6 +1,12 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { describe, expect, it } from 'vitest';
-import { Conversation, EXPLAIN_QUESTION, type ConversationEvent, type SelectionInput } from './conversation';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  Conversation,
+  EXPLAIN_QUESTION,
+  type ConversationEvent,
+  type ModelStreamItem,
+  type SelectionInput,
+} from './conversation';
 import type { PageContext } from './page-context';
 import { contentOf, FakeModel, response, text } from './testing/fake-model';
 
@@ -141,5 +147,80 @@ describe('Conversation: Page Context', () => {
     conversation.addSelection(selection());
     await conversation.ask('What is this?');
     expect(contentOf(model.lastRequest, 0).some((b) => b.type === 'image')).toBe(true);
+  });
+});
+
+/** A response that streams `before`, then waits until aborted (or forever). */
+function hangingResponse(before: string) {
+  return async function* (signal: AbortSignal): AsyncIterable<ModelStreamItem> {
+    const [start, ...rest] = response([text(before)]);
+    yield start!;
+    for (const item of rest) {
+      if (item.type === 'event' && item.event.type === 'content_block_stop') break;
+      yield item;
+    }
+    await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+  };
+}
+
+describe('Conversation: stopping an answer', () => {
+  it('ends the stream cleanly and keeps the text received so far', async () => {
+    const { model, conversation, events } = setup();
+    model.respond(hangingResponse('Partial answer'));
+    conversation.addSelection(selection());
+    const asking = conversation.ask('What is this?');
+    await vi.waitFor(() => expect(events.some((e) => e.type === 'text')).toBe(true));
+    expect(conversation.busy).toBe(true);
+
+    conversation.stop();
+    await asking;
+
+    expect(conversation.busy).toBe(false);
+    expect(events.at(-1)).toEqual({ type: 'stopped' });
+    expect(events).not.toContainEqual({ type: 'done' });
+    const streamed = events.flatMap((e) => (e.type === 'text' ? [e.text] : [])).join('');
+    expect(streamed).toBe('Partial answer');
+  });
+
+  it('lets the user ask again in the same Conversation, with the stopped turn in history', async () => {
+    const { model, conversation } = setup();
+    model.respond(hangingResponse('Partial answer'));
+    conversation.addSelection(selection());
+    const asking = conversation.ask('First?');
+    await vi.waitFor(() => expect(conversation.busy).toBe(true));
+    await new Promise((r) => setTimeout(r, 0));
+    conversation.stop();
+    await asking;
+
+    model.respond(response([text('Second answer')]));
+    await conversation.ask('Second?');
+
+    const { messages } = model.lastRequest;
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(contentOf(model.lastRequest, 0).some((b) => b.type === 'image')).toBe(true);
+    expect(contentOf(model.lastRequest, 1)).toEqual([{ type: 'text', text: 'Partial answer' }]);
+    expect(contentOf(model.lastRequest, 2).at(-1)).toEqual({ type: 'text', text: 'Second?' });
+  });
+
+  it('records a placeholder when stopped before any text arrived', async () => {
+    const { model, conversation } = setup();
+    model.respond(hangingResponse(''));
+    conversation.addSelection(selection());
+    const asking = conversation.ask('First?');
+    await new Promise((r) => setTimeout(r, 0));
+    conversation.stop();
+    await asking;
+
+    model.respond(response([text('ok')]));
+    await conversation.ask('Again?');
+    const stoppedTurn = contentOf(model.lastRequest, 1);
+    expect(stoppedTurn).toHaveLength(1);
+    expect(stoppedTurn[0]?.type === 'text' && stoppedTurn[0].text.length).toBeGreaterThan(0);
+  });
+
+  it('does nothing when no answer is streaming', () => {
+    const { conversation, events } = setup();
+    conversation.stop();
+    expect(events).toEqual([]);
   });
 });

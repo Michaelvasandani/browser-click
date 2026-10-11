@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from 'react';
 import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
 import type { PanelStore, SelectionView, TurnView } from '../store';
+import { Answer } from './Answer';
 
 export interface PanelProps {
   store: PanelStore;
@@ -61,9 +62,15 @@ export function Panel({ store, onClose }: PanelProps) {
             </button>
           )}
           <span className="spacer" />
-          <button type="submit" className="primary" disabled={state.busy || !question.trim()}>
-            Ask
-          </button>
+          {state.busy ? (
+            <button type="button" className="secondary stop" onClick={() => store.stop()}>
+              Stop
+            </button>
+          ) : (
+            <button type="submit" className="primary" disabled={!question.trim()}>
+              Ask
+            </button>
+          )}
         </div>
       </form>
     </section>
@@ -89,8 +96,18 @@ function Turn({ turn }: { turn: TurnView }) {
     <article className="turn" data-status={turn.status}>
       {turn.selections.length > 0 && <Thumbnails selections={turn.selections} />}
       <p className="user-question">{turn.question}</p>
-      {turn.status === 'waiting' && <p className="status">Thinking…</p>}
-      {turn.answer && <div className="answer">{turn.answer}</div>}
+      {turn.status === 'waiting' && (
+        <p className="status waiting" role="status">
+          <span className="dots" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          Thinking
+        </p>
+      )}
+      {turn.answer && <Answer text={turn.answer} />}
+      {turn.status === 'stopped' && <p className="status">Stopped.</p>}
       {turn.status === 'error' && (
         <p className="error" role="alert">
           {turn.error}

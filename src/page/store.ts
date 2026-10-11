@@ -10,7 +10,7 @@ export interface SelectionView {
   pageTextTruncated: boolean;
 }
 
-export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'error';
+export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'stopped' | 'error';
 
 export interface TurnView {
   id: number;
@@ -79,6 +79,10 @@ export class PanelStore {
     return this.run(() => this.conversation.explain());
   }
 
+  stop() {
+    this.conversation.stop();
+  }
+
   private async run(action: () => Promise<void>) {
     if (this.state.busy) return;
     this.update({ busy: true });
@@ -118,6 +122,9 @@ export class PanelStore {
         break;
       case 'done':
         this.updateLastTurn({ status: 'done' });
+        break;
+      case 'stopped':
+        this.updateLastTurn({ status: 'stopped' });
         break;
     }
   }

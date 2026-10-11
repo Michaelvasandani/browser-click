@@ -2,7 +2,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ModelClient } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
-import { placePanel } from '@/lib/placement';
+import { placePanel, type Position } from '@/lib/placement';
 import type { CapturedImage } from './overlay';
 import { Panel } from './panel/Panel';
 import panelCss from './panel/panel.css?inline';
@@ -13,6 +13,7 @@ const PANEL_WIDTH = 380;
 // The smoke-test harness needs to look inside (`wxt build --mode e2e` only).
 const SHADOW_MODE: ShadowRootMode = import.meta.env.MODE === 'e2e' ? 'open' : 'closed';
 const ESTIMATED_PANEL_HEIGHT = 420;
+const VIEWPORT_MARGIN = 12;
 
 /**
  * The Panel's element on the page: a fixed-position host whose Shadow DOM
@@ -45,12 +46,18 @@ export class PanelHost {
       { width: window.innerWidth, height: window.innerHeight },
       { width: PANEL_WIDTH, height: ESTIMATED_PANEL_HEIGHT },
     );
-    this.frame.style.left = `${position.left}px`;
-    this.frame.style.top = `${position.top}px`;
+    this.moveTo(position);
 
     document.documentElement.append(this.host);
     this.root = createRoot(this.frame);
     this.root.render(<Panel store={this.store} onClose={onClose} />);
+  }
+
+  /** Place the Panel, letting it grow no further than the bottom of the viewport. */
+  private moveTo(position: Position) {
+    this.frame.style.left = `${position.left}px`;
+    this.frame.style.top = `${position.top}px`;
+    this.frame.style.maxHeight = `${Math.max(200, window.innerHeight - position.top - VIEWPORT_MARGIN)}px`;
   }
 
   get visible() {
