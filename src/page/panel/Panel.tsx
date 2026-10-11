@@ -58,8 +58,17 @@ export function Panel({ store, onClose, onAddSelection }: PanelProps) {
   };
 
   return (
-    <section className="panel" aria-label="browser-click">
-      <header className="header">
+    <section
+      className="panel"
+      aria-label="browser-click"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+    >
+      <header className="header" title="Drag to move">
         <span className="title">Ask about this</span>
         <button type="button" className="icon-button" aria-label="Close" title="Close" onClick={onClose}>
           ×
