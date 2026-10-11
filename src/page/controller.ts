@@ -1,5 +1,11 @@
 import { browser } from 'wxt/browser';
-import type { BackgroundToPageMessage, CaptureResponse, PageToBackgroundMessage } from '@/lib/messages';
+import type {
+  BackgroundToPageMessage,
+  CaptureResponse,
+  PageSettings,
+  PageToBackgroundMessage,
+} from '@/lib/messages';
+import { portModelClient } from './model-port';
 import { runSelectionMode } from './overlay';
 import { PanelHost } from './panel-host';
 
@@ -9,7 +15,7 @@ export function startPage() {
   let selecting = false;
 
   browser.runtime.onMessage.addListener((message: BackgroundToPageMessage) => {
-    if (message.type === 'begin-selection') void beginSelection(message.fresh);
+    if (message.type === 'begin-selection') void beginSelection(message.fresh, message.settings);
   });
 
   function closePanel() {
@@ -17,7 +23,7 @@ export function startPage() {
     panel = null;
   }
 
-  async function beginSelection(fresh: boolean) {
+  async function beginSelection(fresh: boolean, settings: PageSettings) {
     if (selecting) return;
     selecting = true;
     const panelWasVisible = panel?.visible ?? false;
@@ -39,7 +45,7 @@ export function startPage() {
       }
       if (fresh || !panel) {
         closePanel();
-        panel = new PanelHost(image, closePanel);
+        panel = new PanelHost(image, settings, portModelClient, closePanel);
       } else {
         panel.store.addSelection(image);
         panel.show();

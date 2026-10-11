@@ -1,5 +1,5 @@
-import { useSyncExternalStore } from 'react';
-import type { PanelStore } from '../store';
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from 'react';
+import type { PanelStore, SelectionView, TurnView } from '../store';
 
 export interface PanelProps {
   store: PanelStore;
@@ -8,6 +8,24 @@ export interface PanelProps {
 
 export function Panel({ store, onClose }: PanelProps) {
   const state = useSyncExternalStore(store.subscribe, store.getState);
+  const [question, setQuestion] = useState('');
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const submit = (event?: FormEvent) => {
+    event?.preventDefault();
+    const text = question.trim();
+    if (!text || state.busy) return;
+    setQuestion('');
+    void store.ask(text);
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) submit(event);
+  };
 
   return (
     <section className="panel" aria-label="browser-click">
@@ -17,15 +35,62 @@ export function Panel({ store, onClose }: PanelProps) {
           ×
         </button>
       </header>
+
       <div className="body">
-        {state.pending.length > 0 && (
-          <div className="thumbs">
-            {state.pending.map((selection) => (
-              <img key={selection.id} className="thumb" src={selection.image.dataUrl} alt="Your Selection" />
-            ))}
-          </div>
-        )}
+        {state.turns.map((turn) => (
+          <Turn key={turn.id} turn={turn} />
+        ))}
+        {state.pending.length > 0 && <Thumbnails selections={state.pending} />}
       </div>
+
+      <form className="composer" onSubmit={submit}>
+        <textarea
+          ref={inputRef}
+          className="question"
+          rows={2}
+          placeholder={state.turns.length ? 'Ask a follow-up…' : 'What confuses you about this?'}
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={onKeyDown}
+        />
+        <div className="actions">
+          {state.pending.length > 0 && (
+            <button type="button" className="secondary" disabled={state.busy} onClick={() => void store.explain()}>
+              Explain this
+            </button>
+          )}
+          <span className="spacer" />
+          <button type="submit" className="primary" disabled={state.busy || !question.trim()}>
+            Ask
+          </button>
+        </div>
+      </form>
     </section>
+  );
+}
+
+function Thumbnails({ selections }: { selections: SelectionView[] }) {
+  return (
+    <div className="thumbs">
+      {selections.map((selection) => (
+        <img key={selection.id} className="thumb" src={selection.image.dataUrl} alt={`Selection ${selection.id}`} />
+      ))}
+    </div>
+  );
+}
+
+function Turn({ turn }: { turn: TurnView }) {
+  return (
+    <article className="turn" data-status={turn.status}>
+      {turn.selections.length > 0 && <Thumbnails selections={turn.selections} />}
+      <p className="user-question">{turn.question}</p>
+      {turn.status === 'waiting' && <p className="status">Thinking…</p>}
+      {turn.answer && <div className="answer">{turn.answer}</div>}
+      {turn.status === 'error' && (
+        <p className="error" role="alert">
+          {turn.error}
+        </p>
+      )}
+    </article>
   );
 }

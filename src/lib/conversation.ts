@@ -1,0 +1,141 @@
+import type Anthropic from '@anthropic-ai/sdk';
+import type { ModelId } from './settings';
+
+/**
+ * Conversation: owns the Selections and turns of one Conversation, builds each
+ * request to the model, consumes the streamed response and emits the events the
+ * Panel renders. The model client is passed in.
+ */
+
+export type StreamParams = Anthropic.Messages.MessageStreamParams;
+
+/** One item from a streamed model response: a raw stream event, then the final message. */
+export type ModelStreamItem =
+  | { type: 'event'; event: Anthropic.RawMessageStreamEvent }
+  | { type: 'message'; message: Anthropic.Message };
+
+export interface ModelClient {
+  /** Streams one response. Aborting `signal` must end the stream. Throws ModelError on failure. */
+  stream(params: StreamParams, signal: AbortSignal): AsyncIterable<ModelStreamItem>;
+}
+
+export type ModelErrorKind = 'auth' | 'rate_limit' | 'network' | 'web_search' | 'api';
+
+/** A failed model call, classified into the cases the user can act on. */
+export class ModelError extends Error {
+  constructor(
+    readonly kind: ModelErrorKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ModelError';
+  }
+}
+
+export interface SelectionInput {
+  image: { mediaType: 'image/png' | 'image/jpeg'; data: string };
+}
+
+export type ConversationEvent =
+  /** A question was sent, carrying the Selections attached to it. */
+  | { type: 'turn-started'; question: string; selectionIds: number[] }
+  /** More answer text arrived. */
+  | { type: 'text'; text: string }
+  /** The answer is complete. */
+  | { type: 'done' };
+
+export interface ConversationOptions {
+  client: ModelClient;
+  model: ModelId;
+  onEvent: (event: ConversationEvent) => void;
+}
+
+export const EXPLAIN_QUESTION = 'Explain this.';
+
+export const SYSTEM_PROMPT = `You help a reader who got stuck on part of a web page they are reading or watching. They drag a rectangle over the confusing part; you receive that region as an image (a "Selection"). Each Selection comes with the page's title, URL and text when available (its "Page Context").
+
+- Explain the selected part plainly and briefly: a few short paragraphs at most. The reader can ask for more.
+- Use the Page Context to explain the Selection in the context of the whole page, but don't summarize the page.
+- If a Selection is unreadable, cut off, or it is unclear what it refers to, say so and suggest selecting again rather than guessing.
+- Use Markdown where it helps (short lists, code blocks). Write math in plain text or Unicode, not LaTeX.`;
+
+const MAX_TOKENS = 16000;
+
+interface PendingSelection extends SelectionInput {
+  id: number;
+}
+
+export class Conversation {
+  private readonly options: ConversationOptions;
+  private readonly history: Anthropic.MessageParam[] = [];
+  private pending: PendingSelection[] = [];
+  private nextSelectionId = 1;
+
+  constructor(options: ConversationOptions) {
+    this.options = options;
+  }
+
+  /** Attach a Selection to the next question. Nothing is sent yet. */
+  addSelection(selection: SelectionInput): number {
+    const id = this.nextSelectionId++;
+    this.pending.push({ ...selection, id });
+    return id;
+  }
+
+  get pendingSelectionIds(): number[] {
+    return this.pending.map((s) => s.id);
+  }
+
+  explain(): Promise<void> {
+    return this.ask(EXPLAIN_QUESTION);
+  }
+
+  async ask(question: string): Promise<void> {
+    const selections = this.pending;
+    this.pending = [];
+    const userMessage: Anthropic.MessageParam = { role: 'user', content: this.userContent(question, selections) };
+    this.emit({ type: 'turn-started', question, selectionIds: selections.map((s) => s.id) });
+
+    const controller = new AbortController();
+    let final: Anthropic.Message | undefined;
+    for await (const item of this.options.client.stream(this.buildRequest(userMessage), controller.signal)) {
+      if (item.type === 'message') {
+        final = item.message;
+        continue;
+      }
+      const { event } = item;
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        this.emit({ type: 'text', text: event.delta.text });
+      }
+    }
+    if (final) this.history.push(userMessage, { role: 'assistant', content: final.content });
+    this.emit({ type: 'done' });
+  }
+
+  private userContent(question: string, selections: PendingSelection[]): Anthropic.ContentBlockParam[] {
+    const content: Anthropic.ContentBlockParam[] = [];
+    for (const selection of selections) {
+      content.push({ type: 'text', text: `Selection ${selection.id}:` });
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: selection.image.mediaType, data: selection.image.data },
+      });
+    }
+    content.push({ type: 'text', text: question });
+    return content;
+  }
+
+  private buildRequest(userMessage: Anthropic.MessageParam): StreamParams {
+    return {
+      model: this.options.model,
+      max_tokens: MAX_TOKENS,
+      system: SYSTEM_PROMPT,
+      messages: [...this.history, userMessage],
+      output_config: { effort: 'low' },
+    };
+  }
+
+  private emit(event: ConversationEvent) {
+    this.options.onEvent(event);
+  }
+}

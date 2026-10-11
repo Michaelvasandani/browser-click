@@ -1,3 +1,5 @@
+import { Conversation, type ConversationEvent, type ModelClient } from '@/lib/conversation';
+import type { PageSettings } from '@/lib/messages';
 import type { CapturedImage } from './overlay';
 
 export interface SelectionView {
@@ -5,18 +7,42 @@ export interface SelectionView {
   image: CapturedImage;
 }
 
+export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'error';
+
+export interface TurnView {
+  id: number;
+  question: string;
+  selections: SelectionView[];
+  answer: string;
+  status: TurnStatus;
+  error?: string;
+}
+
 export interface PanelState {
   /** Selections attached to the next question. */
   pending: SelectionView[];
+  turns: TurnView[];
+  /** True while an answer is being generated. */
+  busy: boolean;
 }
 
-/** UI state of one open Panel, rendered by React via useSyncExternalStore. */
+/**
+ * UI state of one open Panel and the Conversation behind it. React renders it
+ * via useSyncExternalStore; the Conversation's events are folded in here.
+ */
 export class PanelStore {
-  private state: PanelState = { pending: [] };
+  private state: PanelState = { pending: [], turns: [], busy: false };
   private listeners = new Set<() => void>();
-  private nextSelectionId = 1;
+  private images = new Map<number, CapturedImage>();
+  private nextTurnId = 1;
+  readonly conversation: Conversation;
 
-  constructor(firstSelection: CapturedImage) {
+  constructor(firstSelection: CapturedImage, settings: PageSettings, client: ModelClient) {
+    this.conversation = new Conversation({
+      client,
+      model: settings.model,
+      onEvent: (event) => this.onConversationEvent(event),
+    });
     this.addSelection(firstSelection);
   }
 
@@ -28,7 +54,65 @@ export class PanelStore {
   };
 
   addSelection(image: CapturedImage) {
-    this.update({ pending: [...this.state.pending, { id: this.nextSelectionId++, image }] });
+    const id = this.conversation.addSelection({ image: { mediaType: image.mediaType, data: image.data } });
+    this.images.set(id, image);
+    this.update({ pending: [...this.state.pending, { id, image }] });
+  }
+
+  ask(question: string) {
+    return this.run(() => this.conversation.ask(question));
+  }
+
+  explain() {
+    return this.run(() => this.conversation.explain());
+  }
+
+  private async run(action: () => Promise<void>) {
+    if (this.state.busy) return;
+    this.update({ busy: true });
+    try {
+      await action();
+    } catch (error) {
+      this.updateLastTurn({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.update({ busy: false });
+    }
+  }
+
+  private onConversationEvent(event: ConversationEvent) {
+    switch (event.type) {
+      case 'turn-started': {
+        const selections = event.selectionIds.map((id) => ({ id, image: this.images.get(id)! }));
+        const turn: TurnView = {
+          id: this.nextTurnId++,
+          question: event.question,
+          selections,
+          answer: '',
+          status: 'waiting',
+        };
+        this.update({
+          turns: [...this.state.turns, turn],
+          pending: this.state.pending.filter((s) => !event.selectionIds.includes(s.id)),
+        });
+        break;
+      }
+      case 'text': {
+        const turn = this.state.turns.at(-1);
+        if (turn) this.updateLastTurn({ answer: turn.answer + event.text, status: 'streaming' });
+        break;
+      }
+      case 'done':
+        this.updateLastTurn({ status: 'done' });
+        break;
+    }
+  }
+
+  private updateLastTurn(patch: Partial<TurnView>) {
+    const turns = this.state.turns.slice();
+    const last = turns.at(-1);
+    if (!last) return;
+    turns[turns.length - 1] = { ...last, ...patch };
+    this.update({ turns });
   }
 
   private update(patch: Partial<PanelState>) {

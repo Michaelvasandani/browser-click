@@ -1,4 +1,6 @@
 import { createRoot, type Root } from 'react-dom/client';
+import type { ModelClient } from '@/lib/conversation';
+import type { PageSettings } from '@/lib/messages';
 import { placePanel } from '@/lib/placement';
 import type { CapturedImage } from './overlay';
 import { Panel } from './panel/Panel';
@@ -6,6 +8,9 @@ import panelCss from './panel/panel.css?inline';
 import { PanelStore } from './store';
 
 const PANEL_WIDTH = 380;
+// Closed, so the page's own scripts cannot read the Conversation out of the DOM.
+// The smoke-test harness needs to look inside (`wxt build --mode e2e` only).
+const SHADOW_MODE: ShadowRootMode = import.meta.env.MODE === 'e2e' ? 'open' : 'closed';
 const ESTIMATED_PANEL_HEIGHT = 420;
 
 /**
@@ -18,10 +23,10 @@ export class PanelHost {
   private root: Root;
   readonly store: PanelStore;
 
-  constructor(firstSelection: CapturedImage, onClose: () => void) {
-    this.store = new PanelStore(firstSelection);
+  constructor(firstSelection: CapturedImage, settings: PageSettings, client: ModelClient, onClose: () => void) {
+    this.store = new PanelStore(firstSelection, settings, client);
     this.host = document.createElement('browser-click-panel');
-    const shadow = this.host.attachShadow({ mode: 'closed' });
+    const shadow = this.host.attachShadow({ mode: SHADOW_MODE });
     const style = document.createElement('style');
     style.textContent = panelCss;
     this.frame = document.createElement('div');

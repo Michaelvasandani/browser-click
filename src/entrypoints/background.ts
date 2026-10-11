@@ -2,6 +2,7 @@ import { browser, type Browser } from 'wxt/browser';
 import type { BackgroundToPageMessage, CaptureResponse, PageToBackgroundMessage } from '@/lib/messages';
 import { isRestrictedUrl } from '@/lib/restricted';
 import { loadSettings } from '@/lib/settings';
+import { listenForModelRequests } from '@/background/model-relay';
 
 export default defineBackground(() => {
   // Keep settings (including the API key) readable only by the extension's own
@@ -9,6 +10,7 @@ export default defineBackground(() => {
   browser.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
 
   browser.action.onClicked.addListener(onActionClicked);
+  listenForModelRequests();
   // Lets the smoke-test harness stand in for a toolbar click (`wxt build --mode e2e` only).
   if (import.meta.env.MODE === 'e2e') Object.assign(globalThis, { __onActionClicked: onActionClicked });
 
@@ -40,7 +42,11 @@ async function onActionClicked(tab: Browser.tabs.Tab) {
     await showCantRunHere(tab);
     return;
   }
-  const message: BackgroundToPageMessage = { type: 'begin-selection', fresh: true };
+  const message: BackgroundToPageMessage = {
+    type: 'begin-selection',
+    fresh: true,
+    settings: { model: settings.model },
+  };
   await browser.tabs.sendMessage(tab.id, message);
 }
 
