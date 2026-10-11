@@ -140,17 +140,32 @@ function Turn({ turn }: { turn: TurnView }) {
     <article className="turn" data-status={turn.status}>
       {turn.selections.length > 0 && <Thumbnails selections={turn.selections} />}
       <p className="user-question">{turn.question}</p>
-      {turn.status === 'waiting' && (
+      {turn.answer && <Answer text={turn.answer} />}
+      {(turn.searching || turn.status === 'waiting') && (
         <p className="status waiting" role="status">
           <span className="dots" aria-hidden="true">
             <span />
             <span />
             <span />
           </span>
-          Thinking
+          {turn.searching ? 'Searching the web…' : 'Thinking'}
         </p>
       )}
-      {turn.answer && <Answer text={turn.answer} />}
+      {webSources(turn).length > 0 && (
+        <div className="sources">
+          <p className="sources-label">Sources</p>
+          <ol>
+            {webSources(turn).map((source) => (
+              <li key={source.url}>
+                <a href={source.url} target="_blank" rel="noopener noreferrer" title={source.url}>
+                  {source.title}
+                </a>
+                <span className="host">{hostOf(source.url)}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
       {turn.status === 'stopped' && <p className="status">Stopped.</p>}
       {turn.status === 'error' && (
         <p className="error" role="alert">
@@ -159,4 +174,24 @@ function Turn({ turn }: { turn: TurnView }) {
       )}
     </article>
   );
+}
+
+/** Sources with web links only: anything else (javascript:, data:…) is never linked. */
+function webSources(turn: TurnView) {
+  return turn.sources.filter((source) => {
+    try {
+      const { protocol } = new URL(source.url);
+      return protocol === 'https:' || protocol === 'http:';
+    } catch {
+      return false;
+    }
+  });
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
 }

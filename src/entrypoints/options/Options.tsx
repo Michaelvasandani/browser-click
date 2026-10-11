@@ -83,6 +83,25 @@ export function Options() {
           </div>
         </section>
 
+        <section>
+          <span className="label">Web search</span>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.webSearch}
+              onChange={(e) => update({ webSearch: e.target.checked })}
+            />
+            <span>
+              <strong>Let Claude search the web</strong>
+              <small className="hint">
+                When the page and Claude's own knowledge aren't enough, Claude can run up to 3 web searches per answer
+                and list its sources. Anthropic bills each search on top of token costs. Turn this off to cap cost and
+                latency.
+              </small>
+            </span>
+          </label>
+        </section>
+
         <div className="actions">
           <button type="submit">Save</button>
           {saved && (

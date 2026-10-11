@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { MAX_PAGE_TEXT_CHARS, type PageContext } from './page-context';
 import type { ModelId } from './settings';
+import { webSearchTool } from './web-search';
 
 /**
  * Conversation: owns the Selections and turns of one Conversation, builds each
@@ -46,14 +47,25 @@ export type ConversationEvent =
   | { type: 'turn-started'; question: string; selectionIds: number[] }
   /** More answer text arrived. */
   | { type: 'text'; text: string }
+  /** A web search started (active) or finished. */
+  | { type: 'searching'; active: boolean }
+  /** Web pages the answer drew on, shown as links under it. */
+  | { type: 'sources'; sources: Source[] }
   /** The answer is complete. */
   | { type: 'done' }
   /** The user stopped the answer; the text received so far stands. */
   | { type: 'stopped' };
 
+export interface Source {
+  url: string;
+  title: string;
+}
+
 export interface ConversationOptions {
   client: ModelClient;
   model: ModelId;
+  /** Offer Anthropic's server-side web search tool. */
+  webSearch?: boolean;
   onEvent: (event: ConversationEvent) => void;
 }
 
@@ -64,9 +76,16 @@ export const SYSTEM_PROMPT = `You help a reader who got stuck on part of a web p
 - Explain the selected part plainly and briefly: a few short paragraphs at most. The reader can ask for more.
 - Use the Page Context to explain the Selection in the context of the whole page, but don't summarize the page.
 - If a Selection is unreadable, cut off, or it is unclear what it refers to, say so and suggest selecting again rather than guessing.
+- If you have a web search tool, search only when the Selection, the Page Context and your own knowledge are not enough to answer correctly.
 - Use Markdown where it helps (short lists, code blocks). Write math in plain text or Unicode, not LaTeX.`;
 
 const MAX_TOKENS = 16000;
+
+/** How many times to resume a turn the API paused during server-side searching. */
+const MAX_CONTINUATIONS = 3;
+
+/** Search results listed when an answer used search but cited nothing. */
+const MAX_UNCITED_SOURCES = 5;
 
 /** Stands in for an answer the user stopped before any text arrived. */
 const STOPPED_PLACEHOLDER = '(The reader stopped this answer before it began.)';
@@ -120,46 +139,70 @@ export class Conversation {
     this.pending = [];
     const { content, sentPages } = this.userContent(question, selections);
     const userMessage: Anthropic.MessageParam = { role: 'user', content };
-    const commit = (assistant: Anthropic.MessageParam) => {
-      this.history.push(userMessage, assistant);
+    const commit = (replies: Anthropic.MessageParam[]) => {
+      this.history.push(userMessage, ...replies);
       this.sentPages = sentPages;
     };
     this.emit({ type: 'turn-started', question, selectionIds: selections.map((s) => s.id) });
 
     const controller = new AbortController();
     this.controller = controller;
-    let final: Anthropic.Message | undefined;
+    // Assistant turns of this exchange: more than one when a paused turn is resumed.
+    const answers: Anthropic.Message[] = [];
     let partialText = '';
+    let searching = false;
+    const setSearching = (active: boolean) => {
+      if (searching === active) return;
+      searching = active;
+      this.emit({ type: 'searching', active });
+    };
+
     try {
-      for await (const item of this.options.client.stream(this.buildRequest(userMessage), controller.signal)) {
-        if (controller.signal.aborted) break;
-        if (item.type === 'message') {
-          final = item.message;
-          continue;
+      for (let continuation = 0; ; continuation++) {
+        const turns = answers.map((m): Anthropic.MessageParam => ({ role: 'assistant', content: m.content }));
+        let final: Anthropic.Message | undefined;
+        for await (const item of this.options.client.stream(this.buildRequest([userMessage, ...turns]), controller.signal)) {
+          if (controller.signal.aborted) break;
+          if (item.type === 'message') {
+            final = item.message;
+            continue;
+          }
+          const { event } = item;
+          if (event.type === 'content_block_start') {
+            if (event.content_block.type === 'server_tool_use') setSearching(true);
+            else if (event.content_block.type === 'text') setSearching(false);
+          } else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            partialText += event.delta.text;
+            this.emit({ type: 'text', text: event.delta.text });
+          }
         }
-        const { event } = item;
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          partialText += event.delta.text;
-          this.emit({ type: 'text', text: event.delta.text });
-        }
+        if (controller.signal.aborted || !final) break;
+        answers.push(final);
+        if (final.stop_reason !== 'pause_turn' || continuation >= MAX_CONTINUATIONS) break;
       }
     } catch (error) {
       if (!controller.signal.aborted) throw error;
     } finally {
       this.controller = null;
+      setSearching(false);
     }
 
+    const replies = answers.map((m): Anthropic.MessageParam => ({ role: 'assistant', content: m.content }));
     if (controller.signal.aborted) {
       // Keep the stopped exchange so follow-ups make sense. Only its text is
       // kept: the partial blocks around it were never completed by the API.
-      commit({
-        role: 'assistant',
-        content: [{ type: 'text', text: partialText.trim() ? partialText : STOPPED_PLACEHOLDER }],
-      });
+      commit([
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: partialText.trim() ? partialText : STOPPED_PLACEHOLDER }],
+        },
+      ]);
       this.emit({ type: 'stopped' });
       return;
     }
-    if (final) commit({ role: 'assistant', content: final.content });
+    commit(replies);
+    const sources = sourcesOf(answers);
+    if (sources.length) this.emit({ type: 'sources', sources });
     this.emit({ type: 'done' });
   }
 
@@ -180,12 +223,13 @@ export class Conversation {
     return { content, sentPages };
   }
 
-  private buildRequest(userMessage: Anthropic.MessageParam): StreamParams {
+  private buildRequest(exchange: Anthropic.MessageParam[]): StreamParams {
     return {
       model: this.options.model,
       max_tokens: MAX_TOKENS,
       system: SYSTEM_PROMPT,
-      messages: [...this.history, userMessage],
+      ...(this.options.webSearch && { tools: [webSearchTool(this.options.model)] }),
+      messages: [...this.history, ...exchange],
       output_config: { effort: 'low' },
       // Automatic caching: the breakpoint follows the end of the conversation, so
       // each follow-up reads earlier Selections and page text from the cache.
@@ -196,6 +240,26 @@ export class Conversation {
   private emit(event: ConversationEvent) {
     this.options.onEvent(event);
   }
+}
+
+/** The pages an answer cited; if it cited none, the search results it saw. */
+function sourcesOf(answers: Anthropic.Message[]): Source[] {
+  const cited = new Map<string, Source>();
+  const found = new Map<string, Source>();
+  for (const block of answers.flatMap((m) => m.content)) {
+    if (block.type === 'text') {
+      for (const citation of block.citations ?? []) {
+        if (citation.type === 'web_search_result_location' && !cited.has(citation.url)) {
+          cited.set(citation.url, { url: citation.url, title: citation.title || citation.url });
+        }
+      }
+    } else if (block.type === 'web_search_tool_result' && Array.isArray(block.content)) {
+      for (const result of block.content) {
+        if (!found.has(result.url)) found.set(result.url, { url: result.url, title: result.title || result.url });
+      }
+    }
+  }
+  return cited.size ? [...cited.values()] : [...found.values()].slice(0, MAX_UNCITED_SOURCES);
 }
 
 const samePageContext = (a: PageContext, b: PageContext) =>

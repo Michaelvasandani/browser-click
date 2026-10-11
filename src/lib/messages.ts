@@ -5,6 +5,7 @@ import type { ModelId } from './settings';
 /** Settings the page code needs. The API key never leaves the Background. */
 export interface PageSettings {
   model: ModelId;
+  webSearch: boolean;
 }
 
 /** Background → page: the user clicked the toolbar icon. */

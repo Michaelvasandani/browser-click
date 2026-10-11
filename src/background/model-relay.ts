@@ -42,6 +42,7 @@ async function relay(port: Browser.runtime.Port, request: ModelPortRequest) {
     post({ type: 'end' });
   } catch (error) {
     if (controller.signal.aborted) return;
-    post({ type: 'error', ...classifyError(error) });
+    const webSearch = request.params.tools?.some((tool) => 'name' in tool && tool.name === 'web_search') ?? false;
+    post({ type: 'error', ...classifyError(error, { webSearch }) });
   }
 }

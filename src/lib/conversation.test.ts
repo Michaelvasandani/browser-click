@@ -373,3 +373,124 @@ describe('Conversation: adding a Selection', () => {
     expect(events).toContainEqual({ type: 'turn-started', question: 'Compare these.', selectionIds: [a, b] });
   });
 });
+
+describe('Conversation: web search', () => {
+  const searchTurn = (stopReason: Anthropic.StopReason = 'end_turn') =>
+    response(
+      [
+        { type: 'thinking', thinking: '', signature: 's' },
+        { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'spectral theorem' } },
+        {
+          type: 'web_search_tool_result',
+          tool_use_id: 'srvtoolu_1',
+          content: [
+            { type: 'web_search_result', url: 'https://a.test/x', title: 'Result X', encrypted_content: 'e1', page_age: null },
+            { type: 'web_search_result', url: 'https://b.test/y', title: 'Result Y', encrypted_content: 'e2', page_age: null },
+          ],
+        },
+        {
+          type: 'text',
+          text: 'The spectral theorem says…',
+          citations: [
+            { type: 'web_search_result_location', url: 'https://b.test/y', title: 'Result Y', encrypted_index: 'i', cited_text: '…' },
+            { type: 'web_search_result_location', url: 'https://b.test/y', title: 'Result Y', encrypted_index: 'j', cited_text: '…' },
+          ],
+        },
+      ] as unknown as Anthropic.ContentBlock[],
+      { stopReason },
+    );
+
+  it('offers the web search tool, limited to 3 searches, when enabled', async () => {
+    const { model, conversation } = setup({ webSearch: true, model: 'claude-sonnet-5-5' });
+    model.respond(response([text('ok')]));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(model.lastRequest.tools).toEqual([{ type: 'web_search_20260209', name: 'web_search', max_uses: 3 }]);
+  });
+
+  it('sends the tool version the chosen model accepts', async () => {
+    const { model, conversation } = setup({ webSearch: true, model: 'claude-haiku-5-5' });
+    model.respond(response([text('ok')]));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(model.lastRequest.tools).toEqual([{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }]);
+  });
+
+  it('omits the tool entirely when web search is off', async () => {
+    const { model, conversation } = setup({ webSearch: false });
+    model.respond(response([text('ok')]));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(model.lastRequest).not.toHaveProperty('tools');
+  });
+
+  it('tells the Panel while a search is running', async () => {
+    const { model, conversation, events } = setup({ webSearch: true });
+    model.respond(searchTurn());
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+
+    const start = events.findIndex((e) => e.type === 'searching' && e.active);
+    const end = events.findIndex((e) => e.type === 'searching' && !e.active);
+    const firstText = events.findIndex((e) => e.type === 'text');
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(end).toBeLessThan(firstText);
+  });
+
+  it('lists the cited sources under the answer, once each', async () => {
+    const { model, conversation, events } = setup({ webSearch: true });
+    model.respond(searchTurn());
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(events).toContainEqual({ type: 'sources', sources: [{ url: 'https://b.test/y', title: 'Result Y' }] });
+    expect(events.findIndex((e) => e.type === 'sources')).toBeLessThan(events.findIndex((e) => e.type === 'done'));
+  });
+
+  it('falls back to the search results when the answer cites nothing', async () => {
+    const { model, conversation, events } = setup({ webSearch: true });
+    model.respond(
+      response([
+        { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'q' } },
+        {
+          type: 'web_search_tool_result',
+          tool_use_id: 'srvtoolu_1',
+          content: [{ type: 'web_search_result', url: 'https://a.test/x', title: 'Result X', encrypted_content: 'e', page_age: null }],
+        },
+        text('Answer without citations.'),
+      ] as unknown as Anthropic.ContentBlock[]),
+    );
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(events).toContainEqual({ type: 'sources', sources: [{ url: 'https://a.test/x', title: 'Result X' }] });
+  });
+
+  it('sends no sources event when nothing was searched', async () => {
+    const { model, conversation, events } = setup({ webSearch: true });
+    model.respond(response([text('From memory.')]));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(events.some((e) => e.type === 'sources' || e.type === 'searching')).toBe(false);
+  });
+
+  it('resumes a paused search turn without adding a user message', async () => {
+    const { model, conversation, events } = setup({ webSearch: true });
+    const paused = [
+      { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'q' } },
+    ] as unknown as Anthropic.ContentBlock[];
+    model.respond(response(paused, { stopReason: 'pause_turn' }));
+    model.respond(response([text('Resumed answer.')]));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+
+    expect(model.requests).toHaveLength(2);
+    const resumed = model.requests[1]!;
+    expect(resumed.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(resumed.messages[1]).toEqual({ role: 'assistant', content: paused });
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
+
+    model.respond(response([text('ok')]));
+    await conversation.ask('Next?');
+    expect(model.lastRequest.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'assistant', 'user']);
+  });
+});

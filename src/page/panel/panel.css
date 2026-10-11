@@ -347,3 +347,34 @@
   font-weight: 600;
   color: var(--muted);
 }
+
+.sources {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.sources-label {
+  margin: 0 0 4px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.sources ol {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.sources li + li {
+  margin-top: 3px;
+}
+
+.sources a {
+  color: var(--accent);
+}
+
+.sources .host {
+  margin-left: 6px;
+  color: var(--muted);
+}

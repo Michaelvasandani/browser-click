@@ -1,4 +1,11 @@
-import { Conversation, type ConversationEvent, type ModelClient } from '@/lib/conversation';
+import {
+  Conversation,
+  ModelError,
+  type ConversationEvent,
+  type ModelClient,
+  type Source,
+} from '@/lib/conversation';
+import { describeError } from '@/lib/error-messages';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
 import type { CapturedImage } from './overlay';
@@ -18,6 +25,9 @@ export interface TurnView {
   selections: SelectionView[];
   answer: string;
   status: TurnStatus;
+  /** A web search is running. */
+  searching: boolean;
+  sources: Source[];
   error?: string;
 }
 
@@ -51,6 +61,7 @@ export class PanelStore {
     this.conversation = new Conversation({
       client,
       model: settings.model,
+      webSearch: settings.webSearch,
       onEvent: (event) => this.onConversationEvent(event),
     });
     this.addSelection(firstSelection, firstPageContext);
@@ -95,7 +106,13 @@ export class PanelStore {
     try {
       await action();
     } catch (error) {
-      this.updateLastTurn({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+      const message =
+        error instanceof ModelError
+          ? describeError(error.kind, error.message)
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      this.updateLastTurn({ status: 'error', error: message, searching: false });
     } finally {
       this.update({ busy: false });
     }
@@ -111,6 +128,8 @@ export class PanelStore {
           selections,
           answer: '',
           status: 'waiting',
+          searching: false,
+          sources: [],
         };
         this.update({
           turns: [...this.state.turns, turn],
@@ -123,6 +142,12 @@ export class PanelStore {
         if (turn) this.updateLastTurn({ answer: turn.answer + event.text, status: 'streaming' });
         break;
       }
+      case 'searching':
+        this.updateLastTurn({ searching: event.active });
+        break;
+      case 'sources':
+        this.updateLastTurn({ sources: event.sources });
+        break;
       case 'page-text-truncated':
         // Already known from the Page Context; shown with the thumbnail.
         break;

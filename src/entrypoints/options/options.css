@@ -130,3 +130,8 @@ button.secondary {
 .saved {
   color: var(--ok);
 }
+
+.toggle small {
+  display: block;
+  font-weight: 400;
+}

@@ -38,6 +38,13 @@ describe('settings', () => {
     expect(await loadSettings(storage)).toMatchObject({ apiKey: 'sk-ant-test', model: 'claude-sonnet-5-5' });
   });
 
+  it('turns web search on by default and remembers when it is turned off', async () => {
+    expect(DEFAULT_SETTINGS.webSearch).toBe(true);
+    const storage = fakeStorage();
+    await saveSettings(storage, { webSearch: false });
+    expect((await loadSettings(storage)).webSearch).toBe(false);
+  });
+
   it('falls back to the default model when the stored one is no longer offered', async () => {
     const storage = fakeStorage({ model: 'claude-retired-1' });
     expect((await loadSettings(storage)).model).toBe('claude-opus-5-5');
