@@ -176,6 +176,9 @@ export class Conversation {
       system: SYSTEM_PROMPT,
       messages: [...this.history, userMessage],
       output_config: { effort: 'low' },
+      // Automatic caching: the breakpoint follows the end of the conversation, so
+      // each follow-up reads earlier Selections and page text from the cache.
+      cache_control: { type: 'ephemeral' },
     };
   }
 

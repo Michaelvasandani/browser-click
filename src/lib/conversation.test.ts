@@ -224,3 +224,81 @@ describe('Conversation: stopping an answer', () => {
     expect(events).toEqual([]);
   });
 });
+
+describe('Conversation: follow-up questions', () => {
+  // An assistant turn as the API returns it, with non-text blocks that must be replayed untouched.
+  const richTurn = [
+    { type: 'thinking', thinking: '', signature: 'sig-abc123' },
+    { type: 'text', text: 'Let me check.', citations: null },
+    { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'eigenvalue' } },
+    {
+      type: 'web_search_tool_result',
+      tool_use_id: 'srvtoolu_1',
+      content: [
+        { type: 'web_search_result', url: 'https://en.wikipedia.org/wiki/Eigenvalue', title: 'Eigenvalue', encrypted_content: 'enc-1', page_age: null },
+      ],
+    },
+    {
+      type: 'text',
+      text: 'It is the scale factor.',
+      citations: [
+        { type: 'web_search_result_location', url: 'https://en.wikipedia.org/wiki/Eigenvalue', title: 'Eigenvalue', encrypted_index: 'idx-1', cited_text: 'scale factor' },
+      ],
+    },
+  ] as unknown as Anthropic.ContentBlock[];
+
+  it('replays each earlier turn exactly as sent and as the API returned it', async () => {
+    const { model, conversation } = setup();
+    model.respond(response(richTurn));
+    model.respond(response([text('Second answer.')]));
+    model.respond(response([text('Third answer.')]));
+    conversation.addSelection(selection());
+    await conversation.ask('First?');
+    await conversation.ask('Second?');
+    await conversation.ask('Third?');
+
+    const [first, second, third] = model.requests;
+    // The assistant turn is the API's content, block for block.
+    expect(second!.messages[1]).toEqual({ role: 'assistant', content: richTurn });
+    // Each request's history is the previous request plus its answer: append-only.
+    expect(second!.messages.slice(0, 1)).toEqual(first!.messages);
+    expect(third!.messages.slice(0, 3)).toEqual(second!.messages);
+    expect(third!.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
+    expect(contentOf(third!, 4)).toEqual([{ type: 'text', text: 'Third?' }]);
+  });
+
+  it('sends a follow-up without re-sending the Selection', async () => {
+    const { model, conversation, events } = setup();
+    model.respond(response([text('one')]));
+    model.respond(response([text('two')]));
+    conversation.addSelection(selection());
+    await conversation.ask('First?');
+    await conversation.ask('Second?');
+
+    const images = model.lastRequest.messages.flatMap((m) =>
+      typeof m.content === 'string' ? [] : m.content.filter((b) => b.type === 'image'),
+    );
+    expect(images).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'turn-started').at(-1)).toEqual({
+      type: 'turn-started',
+      question: 'Second?',
+      selectionIds: [],
+    });
+  });
+
+  it('asks the API to cache the growing conversation, without changing the prefix between turns', async () => {
+    const { model, conversation } = setup();
+    model.respond(response([text('one')]));
+    model.respond(response([text('two')]));
+    conversation.addSelection(selection());
+    await conversation.ask('First?');
+    await conversation.ask('Second?');
+
+    const [first, second] = model.requests;
+    expect(first!.cache_control).toEqual({ type: 'ephemeral' });
+    expect(second!.cache_control).toEqual({ type: 'ephemeral' });
+    // Everything ahead of the messages is byte-identical, so cached prefixes stay valid.
+    const prefix = ({ model, system, tools, output_config }: typeof first & object) => JSON.stringify({ model, system, tools, output_config });
+    expect(prefix(second!)).toBe(prefix(first!));
+  });
+});

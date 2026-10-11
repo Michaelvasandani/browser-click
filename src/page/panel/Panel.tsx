@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+  type KeyboardEvent,
+} from 'react';
 import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
 import type { PanelStore, SelectionView, TurnView } from '../store';
 import { Answer } from './Answer';
@@ -12,10 +20,27 @@ export function Panel({ store, onClose }: PanelProps) {
   const state = useSyncExternalStore(store.subscribe, store.getState);
   const [question, setQuestion] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
+  const turnCount = useRef(state.turns.length);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  // Follow the Conversation as it grows, unless the reader scrolled up to reread.
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const newTurn = state.turns.length !== turnCount.current;
+    turnCount.current = state.turns.length;
+    if (newTurn || stickToBottom.current) body.scrollTop = body.scrollHeight;
+  }, [state]);
+
+  const onScroll = () => {
+    const body = bodyRef.current;
+    if (body) stickToBottom.current = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+  };
 
   const submit = (event?: FormEvent) => {
     event?.preventDefault();
@@ -38,7 +63,7 @@ export function Panel({ store, onClose }: PanelProps) {
         </button>
       </header>
 
-      <div className="body">
+      <div className="body" ref={bodyRef} onScroll={onScroll}>
         {state.turns.map((turn) => (
           <Turn key={turn.id} turn={turn} />
         ))}
