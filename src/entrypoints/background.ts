@@ -15,6 +15,10 @@ export default defineBackground(() => {
   if (import.meta.env.MODE === 'e2e') Object.assign(globalThis, { __onActionClicked: onActionClicked });
 
   browser.runtime.onMessage.addListener((message: PageToBackgroundMessage, sender, sendResponse) => {
+    if (message.type === 'open-options') {
+      void browser.runtime.openOptionsPage();
+      return;
+    }
     if (message.type !== 'capture') return;
     capture(sender.tab?.windowId).then(sendResponse);
     return true;

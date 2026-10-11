@@ -253,12 +253,38 @@
   }
 }
 
-.error {
+.error,
+.refusal {
   margin: 8px 0 0;
   padding: 8px 10px;
   border-radius: 8px;
   background: var(--error-bg);
   color: var(--error-fg);
+}
+
+.refusal {
+  background: var(--subtle);
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+
+.error p,
+.refusal p {
+  margin: 0;
+}
+
+.error-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.error-actions:not(:empty) {
+  margin-top: 8px;
+}
+
+.error .secondary {
+  border-color: currentColor;
+  color: inherit;
 }
 
 .composer {

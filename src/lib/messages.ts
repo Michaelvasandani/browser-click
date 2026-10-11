@@ -25,7 +25,12 @@ export interface CaptureRequest {
 
 export type CaptureResponse = { ok: true; dataUrl: string } | { ok: false; error: string };
 
-export type PageToBackgroundMessage = CaptureRequest;
+/** Page → Background: open the options page (page code cannot). */
+export interface OpenOptionsRequest {
+  type: 'open-options';
+}
+
+export type PageToBackgroundMessage = CaptureRequest | OpenOptionsRequest;
 
 /** Name of the long-lived port the page uses to stream one model response. */
 export const MODEL_PORT = 'model';

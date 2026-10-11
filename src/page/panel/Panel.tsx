@@ -7,6 +7,8 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
+import { browser } from 'wxt/browser';
+import type { PageToBackgroundMessage } from '@/lib/messages';
 import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
 import type { PanelStore, SelectionView, TurnView } from '../store';
 import { Answer } from './Answer';
@@ -65,8 +67,12 @@ export function Panel({ store, onClose, onAddSelection }: PanelProps) {
       </header>
 
       <div className="body" ref={bodyRef} onScroll={onScroll}>
-        {state.turns.map((turn) => (
-          <Turn key={turn.id} turn={turn} />
+        {state.turns.map((turn, index) => (
+          <Turn
+            key={turn.id}
+            turn={turn}
+            onRetry={index === state.turns.length - 1 && !state.busy ? () => void store.retry() : undefined}
+          />
         ))}
         {state.pending.length > 0 && (
           <div className="pending">
@@ -135,7 +141,12 @@ function Thumbnails({ selections }: { selections: SelectionView[] }) {
   );
 }
 
-function Turn({ turn }: { turn: TurnView }) {
+function openOptions() {
+  const message: PageToBackgroundMessage = { type: 'open-options' };
+  void browser.runtime.sendMessage(message).catch(() => {});
+}
+
+function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
   return (
     <article className="turn" data-status={turn.status}>
       {turn.selections.length > 0 && <Thumbnails selections={turn.selections} />}
@@ -167,10 +178,22 @@ function Turn({ turn }: { turn: TurnView }) {
         </div>
       )}
       {turn.status === 'stopped' && <p className="status">Stopped.</p>}
-      {turn.status === 'error' && (
-        <p className="error" role="alert">
-          {turn.error}
-        </p>
+      {(turn.status === 'error' || turn.status === 'refused') && (
+        <div className={turn.status === 'error' ? 'error' : 'refusal'} role="alert">
+          <p>{turn.error}</p>
+          <div className="error-actions">
+            {onRetry && (
+              <button type="button" className="secondary" onClick={onRetry}>
+                Retry
+              </button>
+            )}
+            {turn.fixInOptions && (
+              <button type="button" className="secondary" onClick={openOptions}>
+                Open options
+              </button>
+            )}
+          </div>
+        </div>
       )}
     </article>
   );

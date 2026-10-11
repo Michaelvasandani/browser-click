@@ -17,7 +17,7 @@ export interface SelectionView {
   pageTextTruncated: boolean;
 }
 
-export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'stopped' | 'error';
+export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'stopped' | 'error' | 'refused';
 
 export interface TurnView {
   id: number;
@@ -28,7 +28,10 @@ export interface TurnView {
   /** A web search is running. */
   searching: boolean;
   sources: Source[];
+  /** Why the turn failed or was declined, in plain words. */
   error?: string;
+  /** The failure is about settings the user can change in options. */
+  fixInOptions?: boolean;
 }
 
 export interface PanelState {
@@ -100,6 +103,13 @@ export class PanelStore {
     this.conversation.stop();
   }
 
+  /** Re-send the failed or declined question in place of its turn. */
+  retry() {
+    if (!this.conversation.canRetry || this.state.busy) return;
+    this.update({ turns: this.state.turns.slice(0, -1) });
+    return this.run(() => this.conversation.retry());
+  }
+
   private async run(action: () => Promise<void>) {
     if (this.state.busy) return;
     this.update({ busy: true });
@@ -148,6 +158,19 @@ export class PanelStore {
       case 'sources':
         this.updateLastTurn({ sources: event.sources });
         break;
+      case 'error':
+        this.updateLastTurn({
+          status: 'error',
+          error: event.message,
+          searching: false,
+          fixInOptions: event.kind === 'auth' || event.kind === 'web_search',
+        });
+        this.syncPending();
+        break;
+      case 'refusal':
+        this.updateLastTurn({ status: 'refused', error: event.message, searching: false });
+        this.syncPending();
+        break;
       case 'page-text-truncated':
         // Already known from the Page Context; shown with the thumbnail.
         break;
@@ -158,6 +181,11 @@ export class PanelStore {
         this.updateLastTurn({ status: 'stopped' });
         break;
     }
+  }
+
+  /** Selections the Conversation will send with the next question. */
+  private syncPending() {
+    this.update({ pending: this.conversation.pendingSelectionIds.map((id) => this.selections.get(id)!) });
   }
 
   private updateLastTurn(patch: Partial<TurnView>) {

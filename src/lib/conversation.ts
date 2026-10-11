@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { describeError, REFUSAL_MESSAGE } from './error-messages';
 import { MAX_PAGE_TEXT_CHARS, type PageContext } from './page-context';
 import type { ModelId } from './settings';
 import { webSearchTool } from './web-search';
@@ -54,7 +55,11 @@ export type ConversationEvent =
   /** The answer is complete. */
   | { type: 'done' }
   /** The user stopped the answer; the text received so far stands. */
-  | { type: 'stopped' };
+  | { type: 'stopped' }
+  /** The question failed. Its Selections return to the next question; retry() re-sends it. */
+  | { type: 'error'; kind: ModelErrorKind; message: string; retryable: true }
+  /** The Assistant declined to answer. retry() re-sends the question. */
+  | { type: 'refusal'; message: string };
 
 export interface Source {
   url: string;
@@ -102,6 +107,8 @@ export class Conversation {
   private sentPages: { id: number; page: PageContext }[] = [];
   private nextSelectionId = 1;
   private controller: AbortController | null = null;
+  /** The last question, if it failed or was declined. */
+  private failedQuestion: string | null = null;
 
   constructor(options: ConversationOptions) {
     this.options = options;
@@ -129,6 +136,16 @@ export class Conversation {
     this.controller?.abort();
   }
 
+  /** True when the last question failed or was declined and can be re-sent. */
+  get canRetry(): boolean {
+    return this.failedQuestion !== null && !this.busy;
+  }
+
+  /** Re-send the last question after an error or refusal. */
+  retry(): Promise<void> {
+    return this.failedQuestion === null ? Promise.resolve() : this.ask(this.failedQuestion);
+  }
+
   explain(): Promise<void> {
     return this.ask(EXPLAIN_QUESTION);
   }
@@ -137,6 +154,13 @@ export class Conversation {
     if (this.busy) throw new Error('An answer is already being generated.');
     const selections = this.pending;
     this.pending = [];
+    this.failedQuestion = null;
+    // Neither an error nor a refusal enters the history: the question and its
+    // Selections wait to be retried or to travel with the next question.
+    const giveBack = () => {
+      this.pending = [...selections, ...this.pending];
+      this.failedQuestion = question;
+    };
     const { content, sentPages } = this.userContent(question, selections);
     const userMessage: Anthropic.MessageParam = { role: 'user', content };
     const commit = (replies: Anthropic.MessageParam[]) => {
@@ -181,7 +205,12 @@ export class Conversation {
         if (final.stop_reason !== 'pause_turn' || continuation >= MAX_CONTINUATIONS) break;
       }
     } catch (error) {
-      if (!controller.signal.aborted) throw error;
+      if (!controller.signal.aborted) {
+        if (!(error instanceof ModelError)) throw error;
+        giveBack();
+        this.emit({ type: 'error', kind: error.kind, message: describeError(error.kind, error.message), retryable: true });
+        return;
+      }
     } finally {
       this.controller = null;
       setSearching(false);
@@ -198,6 +227,12 @@ export class Conversation {
         },
       ]);
       this.emit({ type: 'stopped' });
+      return;
+    }
+    if (answers.at(-1)?.stop_reason === 'refusal') {
+      // Deliberately no automatic retry on another model.
+      giveBack();
+      this.emit({ type: 'refusal', message: REFUSAL_MESSAGE });
       return;
     }
     commit(replies);

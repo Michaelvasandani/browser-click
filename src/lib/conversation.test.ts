@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   Conversation,
   EXPLAIN_QUESTION,
+  ModelError,
   type ConversationEvent,
   type ModelStreamItem,
   type SelectionInput,
@@ -492,5 +493,112 @@ describe('Conversation: web search', () => {
     model.respond(response([text('ok')]));
     await conversation.ask('Next?');
     expect(model.lastRequest.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'assistant', 'user']);
+  });
+});
+
+describe('Conversation: errors and refusals', () => {
+  it.each([
+    ['auth', /API key/],
+    ['rate_limit', /rate limit/i],
+    ['network', /connection|reach/i],
+  ] as const)('reports a %s error in plain words and offers a retry', async (kind, wording) => {
+    const { model, conversation, events } = setup();
+    model.respond(new ModelError(kind, 'raw API message'));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+
+    const error = events.at(-1);
+    expect(error).toMatchObject({ type: 'error', kind, retryable: true });
+    expect(error?.type === 'error' && error.message).toMatch(wording);
+    expect(conversation.busy).toBe(false);
+  });
+
+  it("shows any other API error with the API's own message", async () => {
+    const { model, conversation, events } = setup();
+    model.respond(new ModelError('api', 'Overloaded'));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(events.at(-1)).toEqual({ type: 'error', kind: 'api', message: 'Overloaded', retryable: true });
+  });
+
+  it('retries by re-sending the same question with the same Selections', async () => {
+    const { model, conversation, events } = setup();
+    model.respond(new ModelError('network', 'offline'));
+    model.respond(response([text('Recovered.')]));
+    const id = conversation.addSelection(selection('aW1n'));
+    await conversation.ask('What is this?');
+    const failed = model.lastRequest;
+
+    await conversation.retry();
+    expect(model.requests).toHaveLength(2);
+    expect(model.lastRequest).toEqual(failed);
+    expect(events.filter((e) => e.type === 'turn-started').at(-1)).toEqual({
+      type: 'turn-started',
+      question: 'What is this?',
+      selectionIds: [id],
+    });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('keeps the Conversation usable: a different question after an error carries the unsent Selections', async () => {
+    const { model, conversation } = setup();
+    model.respond(response([text('First answer.')]));
+    model.respond(new ModelError('rate_limit', 'slow down'));
+    model.respond(response([text('ok')]));
+    conversation.addSelection(selection('Zmlyc3Q='));
+    await conversation.ask('First?');
+    const second = conversation.addSelection(selection('c2Vjb25k'));
+    await conversation.ask('Second?');
+    expect(conversation.pendingSelectionIds).toEqual([second]);
+
+    await conversation.ask('Something else?');
+    const { messages } = model.lastRequest;
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(contentOf(model.lastRequest, 2)).toContainEqual(
+      expect.objectContaining({ type: 'image', source: expect.objectContaining({ data: 'c2Vjb25k' }) }),
+    );
+    expect(contentOf(model.lastRequest, 2).at(-1)).toEqual({ type: 'text', text: 'Something else?' });
+  });
+
+  it('says plainly when the Assistant declines, without retrying on another model', async () => {
+    const { model, conversation, events } = setup();
+    model.respond(response([text('')], { stopReason: 'refusal' }));
+    conversation.addSelection(selection());
+    await conversation.ask('Something it declines?');
+
+    expect(model.requests).toHaveLength(1);
+    expect(model.lastRequest).not.toHaveProperty('fallbacks');
+    const refusal = events.at(-1);
+    expect(refusal).toMatchObject({ type: 'refusal' });
+    expect(refusal?.type === 'refusal' && refusal.message).toMatch(/declined/i);
+    expect(events).not.toContainEqual({ type: 'done' });
+  });
+
+  it('leaves the Conversation usable after a refusal, with the refused exchange left out', async () => {
+    const { model, conversation } = setup();
+    model.respond(response([text('First answer.')]));
+    model.respond(response([text('I can’t')], { stopReason: 'refusal' }));
+    model.respond(response([text('Sure.')]));
+    model.respond(response([text('Again.')]));
+    conversation.addSelection(selection());
+    await conversation.ask('First?');
+    await conversation.ask('Declined?');
+
+    await conversation.retry();
+    expect(model.lastRequest.model).toBe('claude-opus-5-5');
+    expect(contentOf(model.lastRequest, 2).at(-1)).toEqual({ type: 'text', text: 'Declined?' });
+
+    await conversation.ask('Next?');
+    expect(model.lastRequest.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
+  });
+
+  it('has nothing to retry after a successful answer', async () => {
+    const { model, conversation } = setup();
+    model.respond(response([text('ok')]));
+    conversation.addSelection(selection());
+    await conversation.ask('What is this?');
+    expect(conversation.canRetry).toBe(false);
+    await conversation.retry();
+    expect(model.requests).toHaveLength(1);
   });
 });
