@@ -406,15 +406,15 @@ describe('Conversation: web search', () => {
     model.respond(response([text('ok')]));
     conversation.addSelection(selection());
     await conversation.ask('What is this?');
-    expect(model.lastRequest.tools).toEqual([{ type: 'web_search_20260209', name: 'web_search', max_uses: 3 }]);
+    expect(model.lastRequest.tools).toEqual([{ type: 'web_search_20260318', name: 'web_search', max_uses: 3 }]);
   });
 
-  it('sends the tool version the chosen model accepts', async () => {
+  it('sends the same, newest tool version whichever model is chosen', async () => {
     const { model, conversation } = setup({ webSearch: true, model: 'claude-haiku-5-5' });
     model.respond(response([text('ok')]));
     conversation.addSelection(selection());
     await conversation.ask('What is this?');
-    expect(model.lastRequest.tools).toEqual([{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }]);
+    expect(model.lastRequest.tools).toEqual([{ type: 'web_search_20260318', name: 'web_search', max_uses: 3 }]);
   });
 
   it('omits the tool entirely when web search is off', async () => {

@@ -4,19 +4,14 @@ import type { ModelId } from './settings';
 export const MAX_SEARCHES_PER_ANSWER = 3;
 
 /**
- * The newest web search tool each selectable model accepts. Opus 5.5 and
- * Sonnet 5.5 take `web_search_20260209` (dynamic filtering of results);
- * Haiku 5.5 is not documented for it, so it gets the basic version that
- * every model with web search accepts.
+ * The web search tool sent with every request when web search is on.
+ *
+ * Checked against the live API (October 2026): Claude Opus 5.5, Sonnet 5.5 and
+ * Haiku 5.5 each accept web_search_20250305, _20260209 and _20260318, so every
+ * model gets the newest. It filters results with code execution before they
+ * reach the model (dynamic filtering): fewer tokens, but a few seconds slower
+ * than the basic _20250305 version. Re-check when adding a model.
  */
-const TOOL_VERSION = {
-  'claude-opus-5-5': 'web_search_20260209',
-  'claude-sonnet-5-5': 'web_search_20260209',
-  'claude-haiku-5-5': 'web_search_20250305',
-} as const satisfies Record<ModelId, string>;
-
-export type WebSearchTool = Anthropic.WebSearchTool20260209 | Anthropic.WebSearchTool20250305;
-
-export function webSearchTool(model: ModelId): WebSearchTool {
-  return { type: TOOL_VERSION[model], name: 'web_search', max_uses: MAX_SEARCHES_PER_ANSWER };
+export function webSearchTool(_model: ModelId): Anthropic.WebSearchTool20260318 {
+  return { type: 'web_search_20260318', name: 'web_search', max_uses: MAX_SEARCHES_PER_ANSWER };
 }
