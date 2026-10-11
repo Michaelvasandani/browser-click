@@ -30,12 +30,7 @@ async function relay(port: Browser.runtime.Port, request: ModelPortRequest) {
     // dangerouslyAllowBrowser: this is the user's own key, used only from the
     // extension's service worker; the SDK then sends the header the API expects
     // for browser-originated requests (anthropic-dangerous-direct-browser-access).
-    const client = new Anthropic({
-      apiKey,
-      dangerouslyAllowBrowser: true,
-      // The smoke-test harness points the SDK at a local mock API (`wxt build --mode e2e` only).
-      ...(import.meta.env.MODE === 'e2e' && { baseURL: 'http://localhost:8124' }),
-    });
+    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
     const stream = client.messages.stream(request.params, { signal: controller.signal });
     for await (const event of stream) post({ type: 'item', item: { type: 'event', event } });
     post({ type: 'item', item: { type: 'message', message: await stream.finalMessage() } });

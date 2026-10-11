@@ -9,9 +9,6 @@ import panelCss from './panel/panel.css?inline';
 import { PanelStore } from './store';
 
 const PANEL_WIDTH = 380;
-// Closed, so the page's own scripts cannot read the Conversation out of the DOM.
-// The smoke-test harness needs to look inside (`wxt build --mode e2e` only).
-const SHADOW_MODE: ShadowRootMode = import.meta.env.MODE === 'e2e' ? 'open' : 'closed';
 const ESTIMATED_PANEL_HEIGHT = 420;
 const VIEWPORT_MARGIN = 12;
 
@@ -48,7 +45,8 @@ export class PanelHost {
   ) {
     this.store = new PanelStore(firstSelection, pageContext, settings, client);
     this.host = document.createElement('browser-click-panel');
-    const shadow = this.host.attachShadow({ mode: SHADOW_MODE });
+    // Closed, so the page's own scripts cannot read the Conversation out of the DOM.
+    const shadow = this.host.attachShadow({ mode: 'closed' });
     this.shadow = shadow;
     const style = document.createElement('style');
     style.textContent = panelCss;

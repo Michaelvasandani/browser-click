@@ -11,8 +11,6 @@ export default defineBackground(() => {
 
   browser.action.onClicked.addListener(onActionClicked);
   listenForModelRequests();
-  // Lets the smoke-test harness stand in for a toolbar click (`wxt build --mode e2e` only).
-  if (import.meta.env.MODE === 'e2e') Object.assign(globalThis, { __onActionClicked: onActionClicked });
 
   browser.runtime.onMessage.addListener((message: PageToBackgroundMessage, sender, sendResponse) => {
     if (message.type === 'open-options') {
