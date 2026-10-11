@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { MAX_PAGE_TEXT_CHARS, type PageContext } from './page-context';
 import type { ModelId } from './settings';
 
 /**
@@ -34,9 +35,13 @@ export class ModelError extends Error {
 
 export interface SelectionInput {
   image: { mediaType: 'image/png' | 'image/jpeg'; data: string };
+  /** The page the Selection was made on, captured when it was made. */
+  pageContext?: PageContext;
 }
 
 export type ConversationEvent =
+  /** A Selection was added whose page text was cut off for length. */
+  | { type: 'page-text-truncated'; selectionId: number }
   /** A question was sent, carrying the Selections attached to it. */
   | { type: 'turn-started'; question: string; selectionIds: number[] }
   /** More answer text arrived. */
@@ -79,6 +84,7 @@ export class Conversation {
   addSelection(selection: SelectionInput): number {
     const id = this.nextSelectionId++;
     this.pending.push({ ...selection, id });
+    if (selection.pageContext?.truncated) this.emit({ type: 'page-text-truncated', selectionId: id });
     return id;
   }
 
@@ -115,7 +121,7 @@ export class Conversation {
   private userContent(question: string, selections: PendingSelection[]): Anthropic.ContentBlockParam[] {
     const content: Anthropic.ContentBlockParam[] = [];
     for (const selection of selections) {
-      content.push({ type: 'text', text: `Selection ${selection.id}:` });
+      content.push({ type: 'text', text: describeSelection(selection.id, selection.pageContext) });
       content.push({
         type: 'image',
         source: { type: 'base64', media_type: selection.image.mediaType, data: selection.image.data },
@@ -138,4 +144,18 @@ export class Conversation {
   private emit(event: ConversationEvent) {
     this.options.onEvent(event);
   }
+}
+
+function describeSelection(id: number, page: PageContext | undefined): string {
+  if (!page) return `Selection ${id}:`;
+  const lines = [`Selection ${id}, from this page:`, `Title: ${page.title || '(none)'}`, `URL: ${page.url}`];
+  if (page.text) {
+    lines.push('<page_text>', page.text, '</page_text>');
+    if (page.truncated) {
+      lines.push(`(The page text was cut off after ${MAX_PAGE_TEXT_CHARS.toLocaleString('en-US')} characters.)`);
+    }
+  } else {
+    lines.push('(No readable page text.)');
+  }
+  return lines.join('\n');
 }

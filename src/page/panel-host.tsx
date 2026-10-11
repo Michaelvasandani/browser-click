@@ -1,6 +1,7 @@
 import { createRoot, type Root } from 'react-dom/client';
 import type { ModelClient } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
+import type { PageContext } from '@/lib/page-context';
 import { placePanel } from '@/lib/placement';
 import type { CapturedImage } from './overlay';
 import { Panel } from './panel/Panel';
@@ -23,8 +24,14 @@ export class PanelHost {
   private root: Root;
   readonly store: PanelStore;
 
-  constructor(firstSelection: CapturedImage, settings: PageSettings, client: ModelClient, onClose: () => void) {
-    this.store = new PanelStore(firstSelection, settings, client);
+  constructor(
+    firstSelection: CapturedImage,
+    pageContext: PageContext,
+    settings: PageSettings,
+    client: ModelClient,
+    onClose: () => void,
+  ) {
+    this.store = new PanelStore(firstSelection, pageContext, settings, client);
     this.host = document.createElement('browser-click-panel');
     const shadow = this.host.attachShadow({ mode: SHADOW_MODE });
     const style = document.createElement('style');

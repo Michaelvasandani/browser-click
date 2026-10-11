@@ -1,10 +1,13 @@
 import { Conversation, type ConversationEvent, type ModelClient } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
+import type { PageContext } from '@/lib/page-context';
 import type { CapturedImage } from './overlay';
 
 export interface SelectionView {
   id: number;
   image: CapturedImage;
+  /** The page text sent with this Selection was cut off for length. */
+  pageTextTruncated: boolean;
 }
 
 export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'error';
@@ -33,17 +36,22 @@ export interface PanelState {
 export class PanelStore {
   private state: PanelState = { pending: [], turns: [], busy: false };
   private listeners = new Set<() => void>();
-  private images = new Map<number, CapturedImage>();
+  private selections = new Map<number, SelectionView>();
   private nextTurnId = 1;
   readonly conversation: Conversation;
 
-  constructor(firstSelection: CapturedImage, settings: PageSettings, client: ModelClient) {
+  constructor(
+    firstSelection: CapturedImage,
+    firstPageContext: PageContext,
+    settings: PageSettings,
+    client: ModelClient,
+  ) {
     this.conversation = new Conversation({
       client,
       model: settings.model,
       onEvent: (event) => this.onConversationEvent(event),
     });
-    this.addSelection(firstSelection);
+    this.addSelection(firstSelection, firstPageContext);
   }
 
   getState = (): PanelState => this.state;
@@ -53,10 +61,14 @@ export class PanelStore {
     return () => this.listeners.delete(listener);
   };
 
-  addSelection(image: CapturedImage) {
-    const id = this.conversation.addSelection({ image: { mediaType: image.mediaType, data: image.data } });
-    this.images.set(id, image);
-    this.update({ pending: [...this.state.pending, { id, image }] });
+  addSelection(image: CapturedImage, pageContext: PageContext) {
+    const view: SelectionView = { id: 0, image, pageTextTruncated: pageContext.truncated };
+    view.id = this.conversation.addSelection({
+      image: { mediaType: image.mediaType, data: image.data },
+      pageContext,
+    });
+    this.selections.set(view.id, view);
+    this.update({ pending: [...this.state.pending, view] });
   }
 
   ask(question: string) {
@@ -82,7 +94,7 @@ export class PanelStore {
   private onConversationEvent(event: ConversationEvent) {
     switch (event.type) {
       case 'turn-started': {
-        const selections = event.selectionIds.map((id) => ({ id, image: this.images.get(id)! }));
+        const selections = event.selectionIds.map((id) => this.selections.get(id)!);
         const turn: TurnView = {
           id: this.nextTurnId++,
           question: event.question,
@@ -101,6 +113,9 @@ export class PanelStore {
         if (turn) this.updateLastTurn({ answer: turn.answer + event.text, status: 'streaming' });
         break;
       }
+      case 'page-text-truncated':
+        // Already known from the Page Context; shown with the thumbnail.
+        break;
       case 'done':
         this.updateLastTurn({ status: 'done' });
         break;

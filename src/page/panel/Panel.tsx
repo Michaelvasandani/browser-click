@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from 'react';
+import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
 import type { PanelStore, SelectionView, TurnView } from '../store';
 
 export interface PanelProps {
@@ -75,6 +76,10 @@ function Thumbnails({ selections }: { selections: SelectionView[] }) {
       {selections.map((selection) => (
         <img key={selection.id} className="thumb" src={selection.image.dataUrl} alt={`Selection ${selection.id}`} />
       ))}
+      {selections.some((s) => s.pageTextTruncated) && (
+        <p className="note">This page is long, so Claude will only see the first{' '}
+          {MAX_PAGE_TEXT_CHARS.toLocaleString('en-US')} characters of its text.</p>
+      )}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import type {
   PageSettings,
   PageToBackgroundMessage,
 } from '@/lib/messages';
+import { extractPageContext } from '@/lib/page-context';
 import { portModelClient } from './model-port';
 import { runSelectionMode } from './overlay';
 import { PanelHost } from './panel-host';
@@ -43,11 +44,13 @@ export function startPage() {
         if (panelWasVisible) panel!.show();
         return;
       }
+      // Read per Selection, so one made after in-page navigation carries the new page.
+      const pageContext = extractPageContext(document);
       if (fresh || !panel) {
         closePanel();
-        panel = new PanelHost(image, settings, portModelClient, closePanel);
+        panel = new PanelHost(image, pageContext, settings, portModelClient, closePanel);
       } else {
-        panel.store.addSelection(image);
+        panel.store.addSelection(image, pageContext);
         panel.show();
       }
     } finally {
