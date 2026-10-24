@@ -4,7 +4,7 @@ Ask Claude about the part of a page that confuses you, without leaving the page.
 
 Click the toolbar icon, drag a rectangle over a paragraph, diagram, equation, chart or video frame, and a small Panel opens next to it. Ask your question (or click **Explain this**) and Claude answers in place. It already knows which page you are on and what the surrounding text says. Ask follow-ups, or bring another part of the page into the same Conversation with **Add selection**.
 
-browser-click is a Chrome extension that talks straight to the Anthropic API with your own API key. It has no backend and no telemetry. Terms such as Selection, Page Context and Panel are defined in [GLOSSARY.md](GLOSSARY.md).
+browser-click is a Chrome extension that talks straight to the Anthropic API with your own API key, or answers through your own [Claude Code](https://claude.com/claude-code) so you don't need a key. It has no backend and no telemetry. Terms such as Selection, Page Context and Panel are defined in [GLOSSARY.md](GLOSSARY.md).
 
 ## Install from source
 
@@ -43,6 +43,24 @@ The options page also has:
 
 Settings are kept in Chrome's local extension storage on this computer. They are not synced, and the code browser-click injects into web pages cannot read them.
 
+## Or use Claude Code instead of an API key
+
+If you have Claude Code, browser-click can answer through it. Answers then count against your Claude Code usage, and each Conversation is saved as a Claude Code session you can pick up later. This works on macOS and Linux.
+
+1. Install Claude Code and sign in with `claude auth login`.
+2. On browser-click's options page, choose **Answer with: Claude Code**. The page shows your extension ID.
+3. In the browser-click folder, register the local helper (a [native messaging host](native-host/host.mjs)) for that ID:
+
+   ```sh
+   npm run install-host -- --extension-id <your extension ID>
+   ```
+
+4. Reload browser-click in `chrome://extensions`, click **Check Claude Code** on the options page, then **Save**.
+
+Each open Panel runs one `claude` process. It starts as soon as you make a Selection, so it is usually ready by the time you have typed your question, and follow-ups reuse it. The process ends when you close the Panel. Conversations are saved in `~/browser-click-threads` (pass `--threads-dir` to choose another folder). To pick one up in Claude Code, run `claude --resume` in that folder.
+
+The helper runs Claude Code with browser-click's own instructions, with web search as its only tool (none when web search is off), and without your Claude Code settings, hooks, CLAUDE.md files or MCP servers. Web search uses Claude Code's own search, so answers on this backend don't list source links.
+
 ## Using it
 
 - **Start**: click the toolbar icon. The visible page freezes as a still, so a playing video stays on the frame you reacted to. Drag over the part you want to ask about. `Esc` cancels.
@@ -63,7 +81,9 @@ When you ask a question, browser-click sends a request **directly from your brow
 
 When web search is on, Claude may also send search queries it writes itself. Anthropic runs those searches.
 
-Nothing is sent before you ask a question or click **Explain this**. Nothing goes anywhere else: there is no browser-click server, no analytics and no telemetry. Conversations are kept only in the open page's memory and are discarded when you close the Panel or reload the page. Only your settings are saved.
+With the Claude Code backend, the same request goes to the local helper instead, which hands it to `claude` on your machine. Claude Code sends it to Anthropic under your Claude Code account and saves the Conversation in its session files.
+
+Nothing is sent before you ask a question or click **Explain this**. Nothing goes anywhere else: there is no browser-click server, no analytics and no telemetry. With the API key backend, Conversations are kept only in the open page's memory and are discarded when you close the Panel or reload the page, and only your settings are saved.
 
 What Anthropic does with API requests is governed by your agreement with Anthropic and its [privacy policy](https://www.anthropic.com/legal/privacy). Don't use browser-click on pages whose content you would not want to send to Anthropic.
 
@@ -74,6 +94,7 @@ What Anthropic does with API requests is governed by your agreement with Anthrop
 | `activeTab` | Access to a tab only after you click the toolbar icon, and only until that tab navigates away. browser-click cannot read your other tabs. |
 | `scripting` | Injects the selection overlay and Panel into the page when you click the icon. There are no always-on content scripts. |
 | `storage` | Saves your settings locally. |
+| `nativeMessaging` | Talks to the local Claude Code helper, if you installed it. |
 | `https://api.anthropic.com/*` | The only site browser-click talks to. |
 
 ## Known limits

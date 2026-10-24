@@ -151,7 +151,7 @@ export class PanelStore {
           status: 'error',
           error: event.message,
           searching: false,
-          fixInOptions: event.kind === 'auth' || event.kind === 'web_search',
+          fixInOptions: event.kind === 'auth' || event.kind === 'web_search' || event.kind === 'claude_code_setup',
         });
         this.syncPending();
         break;

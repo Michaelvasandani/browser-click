@@ -8,7 +8,11 @@ export const MODELS = [
 
 export type ModelId = (typeof MODELS)[number]['id'];
 
+/** How browser-click reaches Claude: the user's API key, or their own Claude Code. */
+export type Backend = 'api' | 'claude-code';
+
 export interface Settings {
+  backend: Backend;
   apiKey: string;
   model: ModelId;
   /** Let the Assistant search the web (billed per search). */
@@ -16,6 +20,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
+  backend: 'api',
   apiKey: '',
   model: 'claude-opus-5-5',
   webSearch: true,
@@ -32,6 +37,7 @@ const KEYS = Object.keys(DEFAULT_SETTINGS);
 export async function loadSettings(storage: SettingsStorage): Promise<Settings> {
   const stored = await storage.get(KEYS);
   return {
+    backend: stored.backend === 'claude-code' ? 'claude-code' : DEFAULT_SETTINGS.backend,
     apiKey: typeof stored.apiKey === 'string' ? stored.apiKey : DEFAULT_SETTINGS.apiKey,
     model: MODELS.some((m) => m.id === stored.model) ? (stored.model as ModelId) : DEFAULT_SETTINGS.model,
     webSearch: typeof stored.webSearch === 'boolean' ? stored.webSearch : DEFAULT_SETTINGS.webSearch,

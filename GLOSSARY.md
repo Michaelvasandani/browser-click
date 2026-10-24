@@ -15,7 +15,10 @@ The words below have a specific meaning in browser-click's code, issues and docs
 : The Claude model that answers, called through the Anthropic API with the user's own key.
 
 **Conversation**
-: One thread of questions, answers and Selections in a Panel. It lives only in the open page and is discarded when the Panel closes or the page reloads.
+: One thread of questions, answers and Selections in a Panel. It lives only in the open page and is discarded when the Panel closes or the page reloads; on the Claude Code backend, Claude Code also saves it as a session.
+
+**Backend**
+: How browser-click reaches the Assistant: the Anthropic API with the user's own key (the default), or the user's own Claude Code, through a local native messaging host that runs one `claude` process per Conversation.
 
 **Panel**
 : The small window browser-click opens on the page, next to the first Selection. It shows the Selections, the question box and the Assistant's answers.

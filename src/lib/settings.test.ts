@@ -20,6 +20,14 @@ describe('settings', () => {
     expect(DEFAULT_SETTINGS.model).toBe('claude-opus-5-5');
   });
 
+  it('answers through the API key by default, and keeps a Claude Code choice', async () => {
+    expect(DEFAULT_SETTINGS.backend).toBe('api');
+    const storage = fakeStorage();
+    await saveSettings(storage, { backend: 'claude-code' });
+    expect((await loadSettings(storage)).backend).toBe('claude-code');
+    expect((await loadSettings(fakeStorage({ backend: 'something-else' }))).backend).toBe('api');
+  });
+
   it('returns defaults when nothing is stored', async () => {
     expect(await loadSettings(fakeStorage())).toEqual(DEFAULT_SETTINGS);
     expect(DEFAULT_SETTINGS.apiKey).toBe('');

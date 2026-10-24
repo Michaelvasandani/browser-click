@@ -1,0 +1,245 @@
+import type Anthropic from '@anthropic-ai/sdk';
+import { browser, type Browser } from 'wxt/browser';
+import { SYSTEM_PROMPT, type ModelErrorKind } from '@/lib/conversation';
+import {
+  CLAUDE_CODE_PORT,
+  type ClaudeCodeCheck,
+  type ClaudeCodePortMessage,
+  type ClaudeCodePortRequest,
+  type ModelPortMessage,
+} from '@/lib/messages';
+
+/** The native messaging host installed by native-host/install.mjs. */
+export const CLAUDE_CODE_HOST = 'com.browser_click.claude_code';
+
+/** One line of `claude -p --output-format stream-json`, as forwarded by the host. */
+export type ClaudeCodeOutput =
+  | { type: 'system'; subtype: string; session_id?: string }
+  | { type: 'stream_event'; event: Anthropic.RawMessageStreamEvent }
+  | { type: 'assistant'; message: Anthropic.Message }
+  | { type: 'result'; subtype: string; is_error?: boolean; result?: string; errors?: string[] };
+
+/** Host → Background. */
+export type HostMessage =
+  | { type: 'opened'; sessionId: string }
+  | { type: 'output'; output: ClaudeCodeOutput }
+  | { type: 'exit'; code: number | null; signal: string | null; stderr: string }
+  | { type: 'error'; message: string };
+
+/**
+ * Turns claude's stream-json output for one Conversation into the stream items
+ * the Conversation consumes, one answer at a time: text deltas pass through,
+ * Claude Code's WebSearch calls show as searches, and each answer ends with a
+ * final message built from its assistant turns. Output from an answer the user
+ * stopped is dropped until claude reports that answer's result.
+ */
+export class ClaudeCodeTurns {
+  private active = false;
+  /** Stopped answers whose result claude has yet to report. */
+  private stoppedPending = 0;
+  private text = '';
+  private stopReason: Anthropic.StopReason = 'end_turn';
+  private nextIndex = 0;
+  private textIndex = 0;
+
+  /** True while an answer is being generated for the page. */
+  get busy() {
+    return this.active;
+  }
+
+  ask() {
+    this.active = true;
+    this.text = '';
+    this.stopReason = 'end_turn';
+  }
+
+  /** The user stopped the answer. Returns true if claude should be interrupted. */
+  stop(): boolean {
+    if (!this.active) return false;
+    this.active = false;
+    this.stoppedPending++;
+    return true;
+  }
+
+  output(output: ClaudeCodeOutput): ModelPortMessage[] {
+    if (output.type === 'result' && this.stoppedPending > 0) {
+      this.stoppedPending--;
+      return [];
+    }
+    if (!this.active || this.stoppedPending > 0) return [];
+
+    switch (output.type) {
+      case 'stream_event':
+        return this.streamEvent(output.event);
+      case 'assistant':
+        for (const block of output.message.content) if (block.type === 'text') this.text += block.text;
+        if (output.message.stop_reason) this.stopReason = output.message.stop_reason;
+        return [];
+      case 'result':
+        this.active = false;
+        if (output.is_error || output.subtype !== 'success') {
+          const message = output.result || output.errors?.join(' ') || `Claude Code stopped (${output.subtype}).`;
+          return [{ type: 'error', ...classifyClaudeCodeError(message) }];
+        }
+        return [{ type: 'item', item: { type: 'message', message: this.finalMessage() } }, { type: 'end' }];
+      default:
+        return [];
+    }
+  }
+
+  /** claude exited (or the host went away). Fails the answer in progress, if any. */
+  exit(reason: string): ModelPortMessage[] {
+    this.stoppedPending = 0;
+    if (!this.active) return [];
+    this.active = false;
+    return [{ type: 'error', ...classifyClaudeCodeError(reason) }];
+  }
+
+  private streamEvent(event: Anthropic.RawMessageStreamEvent): ModelPortMessage[] {
+    // Each of Claude Code's API calls numbers its blocks from 0; the
+    // Conversation only looks at block types and text, so renumber them.
+    if (event.type === 'content_block_start') {
+      const block = event.content_block;
+      if (block.type === 'text') {
+        this.textIndex = this.nextIndex++;
+        return [this.event({ type: 'content_block_start', index: this.textIndex, content_block: block })];
+      }
+      if (block.type === 'tool_use' && block.name === 'WebSearch') {
+        // Shown as the API's own web search so the Panel says it is searching.
+        const search = { type: 'server_tool_use', id: block.id, name: 'web_search', input: {} } as Anthropic.ServerToolUseBlock;
+        return [this.event({ type: 'content_block_start', index: this.nextIndex++, content_block: search })];
+      }
+      return [];
+    }
+    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+      return [this.event({ type: 'content_block_delta', index: this.textIndex, delta: event.delta })];
+    }
+    return [];
+  }
+
+  private event(event: Anthropic.RawMessageStreamEvent): ModelPortMessage {
+    return { type: 'item', item: { type: 'event', event } };
+  }
+
+  private finalMessage(): Anthropic.Message {
+    return {
+      id: 'claude-code',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-code',
+      content: [{ type: 'text', text: this.text, citations: null }],
+      stop_reason: this.stopReason,
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    } as Anthropic.Message;
+  }
+}
+
+/** Sorts Claude Code's error text into the cases the Panel can explain. */
+export function classifyClaudeCodeError(message: string): { kind: ModelErrorKind; message: string } {
+  if (/not (logged|signed) in|authenticat|oauth|\/login/i.test(message)) return { kind: 'claude_code_auth', message };
+  if (/native messaging host|couldn't start|ENOENT/i.test(message)) return { kind: 'claude_code_setup', message };
+  return { kind: 'api', message };
+}
+
+/**
+ * Serves the Claude Code port: each open port is one Conversation, bridged to
+ * one copy of the native host and the claude process it runs. If claude exits
+ * (or is killed), the next question starts it again on the saved session.
+ */
+export function listenForClaudeCodeSessions() {
+  browser.runtime.onConnect.addListener((port) => {
+    if (port.name !== CLAUDE_CODE_PORT || port.sender?.id !== browser.runtime.id) return;
+    serve(port);
+  });
+
+  browser.runtime.onMessage.addListener((message: { type?: string }, _sender, sendResponse) => {
+    if (message.type !== 'check-claude-code') return;
+    checkClaudeCode().then(sendResponse);
+    return true;
+  });
+}
+
+function serve(port: Browser.runtime.Port) {
+  const turns = new ClaudeCodeTurns();
+  let open: Extract<ClaudeCodePortRequest, { type: 'open' }> | null = null;
+  let host: Browser.runtime.Port | null = null;
+  let sessionId: string | undefined;
+  /** claude has taken a question, so its session is saved and can be resumed. */
+  let resumable = false;
+  let closed = false;
+
+  const post = (message: ClaudeCodePortMessage) => {
+    if (!closed) port.postMessage(message);
+  };
+
+  const connect = () => {
+    if (!open) return;
+    const native = browser.runtime.connectNative(CLAUDE_CODE_HOST);
+    host = native;
+    native.onMessage.addListener((message: HostMessage) => {
+      if (message.type === 'opened') {
+        sessionId = message.sessionId;
+        post({ type: 'session', sessionId });
+      } else if (message.type === 'output') {
+        if (message.output.type === 'system' && message.output.subtype === 'init') resumable = true;
+        turns.output(message.output).forEach(post);
+      } else if (message.type === 'exit') {
+        const why = message.stderr || `claude exited (${message.signal ?? message.code}).`;
+        turns.exit(why).forEach(post);
+      } else if (message.type === 'error') {
+        turns.exit(message.message).forEach(post);
+      }
+    });
+    native.onDisconnect.addListener(() => {
+      if (host === native) host = null;
+      const why = browser.runtime.lastError?.message ?? 'Claude Code stopped unexpectedly.';
+      turns.exit(why).forEach(post);
+    });
+    native.postMessage({
+      type: 'open',
+      model: open.model,
+      webSearch: open.webSearch,
+      systemPrompt: SYSTEM_PROMPT,
+      title: open.title,
+      sessionId,
+      resume: resumable,
+    });
+  };
+
+  port.onMessage.addListener((request: ClaudeCodePortRequest) => {
+    if (request.type === 'open') {
+      if (open) return;
+      open = request;
+      sessionId = request.sessionId;
+      resumable = request.sessionId !== undefined;
+      // Start claude now, so it is ready by the time the user has typed a question.
+      connect();
+    } else if (request.type === 'ask') {
+      if (turns.busy) return;
+      if (!host) connect();
+      turns.ask();
+      host?.postMessage({ type: 'ask', content: request.content });
+    } else if (request.type === 'stop') {
+      if (turns.stop()) host?.postMessage({ type: 'stop' });
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    // The Panel closed or the page went away: end the claude process with it.
+    closed = true;
+    host?.disconnect();
+    host = null;
+  });
+}
+
+async function checkClaudeCode(): Promise<ClaudeCodeCheck> {
+  try {
+    const reply = (await browser.runtime.sendNativeMessage(CLAUDE_CODE_HOST, { type: 'ping' })) as
+      | { ok: true; version: string; loggedIn: boolean }
+      | { ok: false; message: string };
+    return reply;
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}

@@ -2,6 +2,7 @@ import { browser, type Browser } from 'wxt/browser';
 import type { BackgroundToPageMessage, CaptureResponse, PageToBackgroundMessage } from '@/lib/messages';
 import { isRestrictedUrl } from '@/lib/restricted';
 import { loadSettings } from '@/lib/settings';
+import { listenForClaudeCodeSessions } from '@/background/claude-code';
 import { listenForModelRequests } from '@/background/model-relay';
 
 export default defineBackground(() => {
@@ -11,6 +12,7 @@ export default defineBackground(() => {
 
   browser.action.onClicked.addListener(onActionClicked);
   listenForModelRequests();
+  listenForClaudeCodeSessions();
 
   browser.runtime.onMessage.addListener((message: PageToBackgroundMessage, sender, sendResponse) => {
     if (message.type === 'open-options') {
@@ -27,7 +29,7 @@ async function onActionClicked(tab: Browser.tabs.Tab) {
   if (tab.id === undefined) return;
 
   const settings = await loadSettings(browser.storage.local);
-  if (!settings.apiKey) {
+  if (settings.backend === 'api' && !settings.apiKey) {
     await browser.runtime.openOptionsPage();
     return;
   }
@@ -47,7 +49,7 @@ async function onActionClicked(tab: Browser.tabs.Tab) {
   const message: BackgroundToPageMessage = {
     type: 'begin-selection',
     fresh: true,
-    settings: { model: settings.model, webSearch: settings.webSearch },
+    settings: { backend: settings.backend, model: settings.model, webSearch: settings.webSearch },
   };
   try {
     await browser.tabs.sendMessage(tab.id, message);

@@ -5,7 +5,9 @@ import type {
   PageSettings,
   PageToBackgroundMessage,
 } from '@/lib/messages';
+import type { ModelClient } from '@/lib/conversation';
 import { extractPageContext } from '@/lib/page-context';
+import { openClaudeCodeClient, type ClaudeCodeClient } from './claude-code-port';
 import { portModelClient } from './model-port';
 import { runSelectionMode } from './overlay';
 import { PanelHost } from './panel-host';
@@ -16,6 +18,8 @@ const ACCESS_LOST_NOTICE =
 /** Wires the page code together: Selection Mode, the Panel and the Background. */
 export function startPage() {
   let panel: PanelHost | null = null;
+  // The Claude Code backend's client lives as long as its Panel.
+  let claudeCode: ClaudeCodeClient | null = null;
   let selecting = false;
   // Set when "Add selection" could not capture the tab. The next toolbar click
   // (which restores access) then adds to this Conversation instead of replacing it.
@@ -30,6 +34,8 @@ export function startPage() {
   function closePanel() {
     panel?.destroy();
     panel = null;
+    claudeCode?.close();
+    claudeCode = null;
     resumeAfterAccessLost = false;
   }
 
@@ -87,7 +93,9 @@ export function startPage() {
       // Panel was closed meanwhile has nowhere to go.
       if (!settings) return;
       closePanel();
-      panel = new PanelHost(image, pageContext, settings, portModelClient, {
+      let client: ModelClient = portModelClient;
+      if (settings.backend === 'claude-code') client = claudeCode = openClaudeCodeClient(settings, pageContext.title);
+      panel = new PanelHost(image, pageContext, settings, client, {
         onClose: closePanel,
         onAddSelection: addSelection,
       });

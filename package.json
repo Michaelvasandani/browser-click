@@ -12,7 +12,8 @@
     "compile": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "wxt prepare"
+    "postinstall": "wxt prepare",
+    "install-host": "node native-host/install.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",
