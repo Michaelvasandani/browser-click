@@ -11,6 +11,10 @@ export function describeError(kind: ModelErrorKind, apiMessage: string): string 
       return "Couldn't reach Anthropic. Check your internet connection, then retry.";
     case 'web_search':
       return `Anthropic rejected the web search tool (“${apiMessage}”). Turn web search off in browser-click's options, or ask your Anthropic organization's admin to enable it.`;
+    case 'claude_code_setup':
+      return `browser-click couldn't reach Claude Code (“${apiMessage}”). Follow the Claude Code setup in browser-click's options.`;
+    case 'claude_code_auth':
+      return 'Claude Code isn\'t signed in. Run `claude auth login` in a terminal, then retry.';
     case 'api':
       return apiMessage;
   }

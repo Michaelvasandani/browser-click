@@ -135,3 +135,28 @@ button.secondary {
   display: block;
   font-weight: 400;
 }
+
+.steps {
+  padding-left: 20px;
+}
+
+.steps li + li {
+  margin-top: 6px;
+}
+
+.steps pre,
+.hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.steps pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}

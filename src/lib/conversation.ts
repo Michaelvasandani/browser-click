@@ -22,7 +22,16 @@ export interface ModelClient {
   stream(params: StreamParams, signal: AbortSignal): AsyncIterable<ModelStreamItem>;
 }
 
-export type ModelErrorKind = 'auth' | 'rate_limit' | 'network' | 'web_search' | 'api';
+export type ModelErrorKind =
+  | 'auth'
+  | 'rate_limit'
+  | 'network'
+  | 'web_search'
+  | 'api'
+  /** The Claude Code host is not installed, or claude could not be started. */
+  | 'claude_code_setup'
+  /** Claude Code is not signed in. */
+  | 'claude_code_auth';
 
 /** A failed model call, classified into the cases the user can act on. */
 export class ModelError extends Error {
