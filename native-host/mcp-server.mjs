@@ -26,11 +26,17 @@ let nextCallId = 1;
 
 const host = connect(socketPath);
 readLines(host, (line) => {
-  const message = JSON.parse(line);
-  if (message.type === 'tools') {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    // One bad line must not take every page tool down with it.
+    return;
+  }
+  if (message?.type === 'tools') {
     tools = Array.isArray(message.tools) ? message.tools : [];
     toolsReady.splice(0).forEach((resolve) => resolve());
-  } else if (message.type === 'result') {
+  } else if (message?.type === 'result') {
     pending.get(message.id)?.(message.result);
     pending.delete(message.id);
   }

@@ -130,8 +130,9 @@ function open({ model, webSearch, pageTools: tools = [], systemPrompt, title, se
     '--system-prompt', systemPrompt,
     // Claude Code is a coding agent: give it nothing but web search and
     // browser-click's own page tools, and none of the user's settings, hooks,
-    // CLAUDE.md files or MCP servers.
-    '--tools', webSearch ? 'WebSearch' : '',
+    // CLAUDE.md files or MCP servers. The same list goes to --tools and
+    // --allowedTools ('' when there is none, which disables every tool).
+    '--tools', allowedTools.join(','),
     ...(allowedTools.length ? ['--allowedTools', allowedTools.join(',')] : []),
     ...(mcpConfig ? ['--mcp-config', JSON.stringify(mcpConfig)] : []),
     '--permission-mode', 'dontAsk',
