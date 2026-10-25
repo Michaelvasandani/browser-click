@@ -167,7 +167,7 @@ const SCROLL_TO: PageToolDefinition = {
 const CLICK: PageToolDefinition = {
   name: 'click',
   description:
-    'Click a button or link in view, when that is the obvious next step for what the reader asked. Takes an element reference from the latest look; never coordinates. Each click waits for the reader to allow it, and they may say no: if so, carry on without it. Returns the elements in view afterwards.',
+    'Click a button or link in view, when that is the obvious next step for what the reader asked. Takes an element reference from the latest look; never coordinates. Each click waits for the reader to allow it, and they may say no: if so, carry on without it. Some clicks are always refused: anything that submits a form, links that leave the page, and content embedded from other sites. Returns the elements in view afterwards.',
   inputSchema: {
     type: 'object',
     properties: { element: { type: 'string', description: 'An element reference from look, such as e3.' } },
@@ -342,8 +342,13 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
       }
       // The page may have changed while the user decided.
       if (!element.isConnected) return pageAction('click', target, 'refused', `${described} is no longer on the page.`);
-      (element as HTMLElement).click();
-      await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+      const still = clickTarget(doc, refs, { element: refs.ref(element) });
+      if ('refusal' in still) return pageAction('click', target, 'refused', `It changed while the user decided: ${still.refusal}`);
+      const stopped = await whileActing(doc, async () => {
+        (element as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+      });
+      if (stopped) return pageAction('click', target, 'refused', `Clicked ${described}, but ${stopped}`);
       return pageAction('click', target, 'done', `Clicked ${described}.`);
     },
   };
@@ -460,12 +465,168 @@ function scrollTarget(
 function clickTarget(doc: Document, refs: Refs, input: Record<string, unknown>): { element: Element } | { refusal: string; asked: string } {
   const asked = typeof input.element === 'string' ? input.element : 'nothing';
   const element = refs.element(input.element);
-  if (!element || !isListed(element)) return { asked, refusal: unknownElement(input.element) };
+  if (!element) return { asked, refusal: unknownElement(input.element) };
+  const outOfReach = offLimits(doc, element);
+  if (outOfReach) return { asked: nameOf(element) || roleOf(element), refusal: `${refs.ref(element)} ${outOfReach}` };
+  if (!isListed(element)) return { asked, refusal: unknownElement(input.element) };
   const view = doc.defaultView!;
   if (!inView(element, { width: view.innerWidth, height: view.innerHeight })) {
     return { asked, refusal: `${refs.ref(element)} (${describeElement(element)}) is not in view. Only what is in view can be clicked.` };
   }
+  const never = neverClicked(element);
+  if (never) {
+    return { asked: nameOf(element) || roleOf(element), refusal: `${refs.ref(element)} (${describeElement(element)}) ${never}` };
+  }
   return { element };
+}
+
+/**
+ * Why no Page Action may ever touch this element, or undefined if the
+ * action's own rules decide. Out of reach: browser-click's own elements (the
+ * Panel, Selection Mode, Marks), anything outside this document (shadow roots
+ * included), and frames holding content from another origin.
+ */
+function offLimits(doc: Document, element: Element): string | undefined {
+  if (element.ownerDocument !== doc) return 'is in content embedded from another site. browser-click never acts inside it.';
+  for (let node: Element | null = element; node; ) {
+    if (node.tagName.startsWith(OWN_ELEMENT_PREFIX)) {
+      return "is part of browser-click's own panel or Marks, not the page. browser-click never acts on its own controls.";
+    }
+    // Climb out of shadow roots too: the Panel's controls live in one.
+    node = node.parentElement ?? ((node.getRootNode() as ShadowRoot).host || null);
+  }
+  if (isFrame(element) && !sameOriginFrame(element as HTMLIFrameElement)) {
+    return 'is content embedded from another site. browser-click never acts inside it; tell the reader what to do there instead.';
+  }
+  return undefined;
+}
+
+const isFrame = (element: Element) => ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(element.tagName);
+
+/** Whether a frame shows content from the page's own origin. A sandbox without allow-same-origin never does. */
+function sameOriginFrame(frame: HTMLIFrameElement): boolean {
+  const sandbox = frame.getAttribute('sandbox');
+  if (sandbox !== null && !sandbox.toLowerCase().split(/\s+/).includes('allow-same-origin')) return false;
+  if (frame.tagName !== 'IFRAME' && frame.tagName !== 'FRAME') return false;
+  if (frame.hasAttribute('srcdoc')) return true;
+  const src = frame.getAttribute('src')?.trim();
+  if (!src || src === 'about:blank') return true;
+  try {
+    return new URL(src, frame.ownerDocument.baseURI).origin === new URL(frame.ownerDocument.URL).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Runs a Page Action with the page kept in place: a link click or form
+ * submission the page's own scripts did not handle is cancelled, and anything
+ * that still tries to unload the page (a script we couldn't predict) makes
+ * the browser ask "Leave site?". Resolves with what was stopped, if anything.
+ */
+async function whileActing(doc: Document, act: () => Promise<void>): Promise<string | undefined> {
+  const view = doc.defaultView!;
+  let stopped: string | undefined;
+  // Bubble phase on the window: after the page's own handlers, such as a router's.
+  const onClick = (event: Event) => {
+    if (event.defaultPrevented || !(event.target instanceof view.Element)) return;
+    const activated = activatedBy(event.target);
+    if (!activated?.matches('a[href], area[href]') || staysInDocument(activated as HTMLAnchorElement)) return;
+    event.preventDefault();
+    stopped = 'it would have loaded another page, so browser-click stopped it. The page did not change. Tell the reader where the link goes instead.';
+  };
+  // Capture phase on the window, before the page's handlers: many pages send a
+  // form from their own submit handler, so they must not see the event at all.
+  const onSubmit = (event: Event) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    stopped = 'the page tried to submit a form, so browser-click stopped it. Nothing was sent.';
+  };
+  const onBeforeUnload = (event: BeforeUnloadEvent) => {
+    event.preventDefault();
+    // Older browsers ask only when returnValue is set.
+    event.returnValue = '';
+  };
+  view.addEventListener('click', onClick);
+  view.addEventListener('submit', onSubmit, true);
+  view.addEventListener('beforeunload', onBeforeUnload);
+  try {
+    await act();
+  } finally {
+    view.removeEventListener('click', onClick);
+    view.removeEventListener('submit', onSubmit, true);
+    view.removeEventListener('beforeunload', onBeforeUnload);
+  }
+  return stopped;
+}
+
+/** Whether following this link stays in the current document: an in-page link, or a script link. */
+function staysInDocument(link: HTMLAnchorElement | HTMLAreaElement): boolean {
+  let url: URL;
+  try {
+    url = new URL(link.href);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'javascript:') return true;
+  const here = new URL(link.ownerDocument.URL);
+  return url.hash !== '' && url.origin === here.origin && url.pathname === here.pathname && url.search === here.search;
+}
+
+/**
+ * What a click on this element would activate: the nearest link, button or
+ * field it is inside (a click on a span in a button presses the button), or
+ * the control a label is for.
+ */
+function activatedBy(element: Element): Element | null {
+  const activatable = element.closest('a[href], area[href], button, input, select, textarea, label');
+  if (activatable?.tagName === 'LABEL') return (activatable as HTMLLabelElement).control ?? null;
+  return activatable;
+}
+
+/** Why a click on this element is never allowed, Allow or not; or undefined if it may be asked for. */
+function neverClicked(element: Element): string | undefined {
+  const activated = activatedBy(element);
+  if (activated && submitsForm(activated)) {
+    return 'would submit a form. browser-click never submits forms; tell the reader what to press instead.';
+  }
+  if (activated?.matches('a[href], area[href]')) return leavesPage(activated as HTMLAnchorElement | HTMLAreaElement);
+  return undefined;
+}
+
+/**
+ * Why following this link would leave the page, or undefined if it may stay
+ * on it. In-page (#fragment) links stay. Other links to this site are allowed
+ * through, since a single-page app's router may handle them without loading a
+ * document; the click is then guarded by `guardNavigation`.
+ */
+function leavesPage(link: HTMLAnchorElement | HTMLAreaElement): string | undefined {
+  const doc = link.ownerDocument;
+  const tell = 'Tell the reader where the link goes instead.';
+  if (link.hasAttribute('download')) return `would download a file. browser-click never follows download links. ${tell}`;
+  const target = (link.getAttribute('target') ?? doc.querySelector('base[target]')?.getAttribute('target') ?? '').trim().toLowerCase();
+  if (target && target !== '_self') return `would open a new tab or window. browser-click never opens other pages. ${tell}`;
+  let url: URL;
+  try {
+    url = new URL(link.href);
+  } catch {
+    return `has a link browser-click can't read. ${tell}`;
+  }
+  if (url.protocol === 'javascript:') return undefined;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return `would open another app (${url.protocol}). ${tell}`;
+  if (url.origin !== new URL(doc.URL).origin) return `would leave the page for another site (${url.host}). ${tell}`;
+  return undefined;
+}
+
+/** Whether pressing this control submits a form: any submit control, or a default button inside a form. */
+function submitsForm(control: Element): boolean {
+  const tag = control.tagName;
+  if (tag === 'INPUT') return ['submit', 'image'].includes((control as HTMLInputElement).type);
+  if (tag !== 'BUTTON') return false;
+  const button = control as HTMLButtonElement;
+  if (button.type !== 'submit') return false;
+  // A button with no type is a submit button only inside a form.
+  return button.getAttribute('type')?.trim().toLowerCase() === 'submit' || button.form !== null;
 }
 
 function describeElement(element: Element): string {
