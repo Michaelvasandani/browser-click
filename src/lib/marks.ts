@@ -60,6 +60,18 @@ export class MarksLayer {
     this.root.append(mark);
   }
 
+  /** Hide the Marks, such as while the page is captured. Returns true if they were showing. */
+  hide(): boolean {
+    if (this.host.style.visibility === 'hidden') return false;
+    this.host.style.visibility = 'hidden';
+    return true;
+  }
+
+  /** Show the Marks again after hide(). */
+  show() {
+    this.host.style.visibility = '';
+  }
+
   /** Remove every Mark. Returns true if there were any. */
   clear(): boolean {
     const marks = this.root.querySelectorAll('[data-mark]');

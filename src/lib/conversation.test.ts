@@ -9,7 +9,8 @@ import {
   type SelectionInput,
 } from './conversation';
 import type { PageContext } from './page-context';
-import { createPageTools } from './page-tools';
+import type { CaptureResponse } from './messages';
+import { createPageTools, offeredPageTools, type CaptureVisiblePage } from './page-tools';
 import {
   contentOf,
   FakeModel,
@@ -20,7 +21,7 @@ import {
   text,
   type ScriptedPageToolCall,
 } from './testing/fake-model';
-import { marksOn, pageDocument } from './testing/page-document';
+import { marksOn, marksShowing, pageDocument } from './testing/page-document';
 
 const selection = (data = 'aW1hZ2U='): SelectionInput => ({ image: { mediaType: 'image/png', data } });
 
@@ -805,5 +806,133 @@ describe('Conversation: Marks', () => {
     expect(resultText(await mark.result)).toMatch(/look/);
     expect(marksOn(doc)).toEqual([]);
     expect(events.some((e) => e.type === 'mark')).toBe(false);
+  });
+});
+
+describe('Conversation: looking at the page as an image', () => {
+  const PAGE = `
+    <h1>Usage</h1>
+    <canvas aria-label="Requests per day"></canvas>
+    <button data-rect="40,200,80,30">Export</button>`;
+
+  /** A captured still of the visible page, as the Background returns it. */
+  const STILL = 'data:image/jpeg;base64,c3RpbGw=';
+
+  function setupLooking(capture: CaptureVisiblePage = async () => ({ ok: true, dataUrl: STILL })) {
+    const doc = pageDocument(PAGE);
+    const captures = vi.fn(capture);
+    const pageTools = createPageTools(doc, { drawOnPage: true }, { capture: captures });
+    return { doc, captures, ...setup({ pageTools }) };
+  }
+
+  it('returns an image of the visible page alongside the element list when asked for one', async () => {
+    const { model, events, captures, conversation } = setupLooking();
+    const look = pageToolCall('look', { image: true });
+    model.respond([look, ...response([text('The spike is on Tuesday.')])]);
+    await conversation.ask('What happened in this chart?');
+
+    const result = await look.result;
+    expect(result.isError).toBeFalsy();
+    expect(resultText(result)).toMatch(/button "Export"/);
+    expect(result.content).toContainEqual({ type: 'image', data: 'c3RpbGw=', mimeType: 'image/jpeg' });
+    expect(captures).toHaveBeenCalledTimes(1);
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('returns text only, and takes no image, without the option', async () => {
+    const { model, captures, conversation } = setupLooking();
+    const look = pageToolCall('look');
+    const lookNo = pageToolCall('look', { image: false });
+    model.respond([look, lookNo, ...response([text('ok')])]);
+    await conversation.ask('What is here?');
+
+    for (const result of [await look.result, await lookNo.result]) {
+      expect(result.content.every((part) => part.type === 'text')).toBe(true);
+      expect(resultText(result)).toMatch(/button "Export"/);
+    }
+    expect(captures).not.toHaveBeenCalled();
+  });
+
+  it('offers the image as an option of look', () => {
+    const look = offeredPageTools({ drawOnPage: true }).find((tool) => tool.name === 'look')!;
+    expect(look.inputSchema.properties).toHaveProperty('image');
+  });
+
+  it('keeps the Marks out of the image, and puts them back afterwards', async () => {
+    let marksInImage = -1;
+    const { doc, model, conversation } = setupLooking(async () => {
+      marksInImage = marksShowing(doc);
+      return { ok: true, dataUrl: STILL };
+    });
+    const firstLook = pageToolCall('look');
+    let mark: ScriptedPageToolCall | undefined;
+    const look = pageToolCall('look', { image: true });
+    model.respond(async function* () {
+      yield firstLook;
+      mark = pageToolCall('mark', { element: refOf(await firstLook.result, 'Export') });
+      yield mark;
+      yield look;
+      yield* response([text('ok')]);
+    });
+    await conversation.ask('Where is export?');
+
+    const marked = await mark!.result;
+    expect(marked.isError).toBeFalsy();
+    // Only look returns an image.
+    expect(marked.content.every((part) => part.type === 'text')).toBe(true);
+    expect((await look.result).isError).toBeFalsy();
+    expect(marksInImage).toBe(0);
+    expect(marksShowing(doc)).toBe(1);
+  });
+
+  it('never takes the image while Selection Mode is showing', async () => {
+    const { doc, model, events, captures, conversation } = setupLooking();
+    doc.documentElement.append(doc.createElement('browser-click-overlay'));
+    const look = pageToolCall('look', { image: true });
+    model.respond([look, ...response([text('I could not see it.')])]);
+    await conversation.ask('What is in this chart?');
+
+    const result = await look.result;
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(/selection mode/i);
+    expect(result.content.some((part) => part.type === 'image')).toBe(false);
+    expect(captures).not.toHaveBeenCalled();
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it.each([
+    ['fails', async () => ({ ok: false as const, error: 'The tab is not allowed to be captured.' }), /not allowed to be captured/],
+    [
+      'throws',
+      async (): Promise<CaptureResponse> => {
+        throw new Error('Extension context invalidated.');
+      },
+      /Extension context invalidated/,
+    ],
+    ['returns an image too large to send', async () => ({ ok: true as const, dataUrl: `data:image/jpeg;base64,${'A'.repeat(2_000_000)}` }), /too large/i],
+  ])('tells the Assistant why when the capture %s, and the answer carries on', async (_, capture, reason) => {
+    const { model, events, conversation } = setupLooking(capture);
+    const look = pageToolCall('look', { image: true });
+    model.respond([look, ...response([text('I can only read the element list.')])]);
+    await conversation.ask('What is in this chart?');
+
+    const result = await look.result;
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(reason);
+    expect(result.content.some((part) => part.type === 'image')).toBe(false);
+    expect(events).toContainEqual({ type: 'text', text: expect.any(String) });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('tells the Assistant why when no capture is available', async () => {
+    const doc = pageDocument(PAGE);
+    const { model, events, conversation } = setup({ pageTools: createPageTools(doc, { drawOnPage: true }) });
+    const look = pageToolCall('look', { image: true });
+    model.respond([look, ...response([text('ok')])]);
+    await conversation.ask('What is in this chart?');
+
+    expect(await look.result).toMatchObject({ isError: true });
+    expect(resultText(await look.result)).toMatch(/image/i);
+    expect(events.at(-1)).toEqual({ type: 'done' });
   });
 });

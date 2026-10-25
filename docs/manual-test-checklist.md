@@ -75,6 +75,13 @@ The in-browser flow is checked by hand before a release. Unit tests (`npm test`)
 - [ ] Try web search with each of the three models: none is rejected for the tool version.
 - [ ] If your organization has web search disabled, the Panel says Anthropic rejected the web search tool and offers **Open options**.
 
+## Looking at the page as an image (Claude Code)
+
+- [ ] On a page with a chart or canvas, ask what it shows: the Assistant calls *look* with an image and describes the chart. On a text-only question it calls *look* without one.
+- [ ] With a Mark on the page, ask a question that needs an image: the Mark is not in the image (it may blink off for a moment) and is back afterwards.
+- [ ] On a large, high-DPI window the image still reaches the Assistant (it is shrunk below the 1 MB native message cap); the answer doesn't hang.
+- [ ] Start Selection Mode while an answer is running: a *look* image asked for meanwhile is refused with a reason, and the answer carries on.
+
 ## Errors
 
 - [ ] With a wrong API key, the Panel says the key wasn't accepted, with **Retry** and **Open options**. After fixing the key, **Retry** answers the same question.
