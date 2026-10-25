@@ -11,7 +11,7 @@ import {
 import { browser } from 'wxt/browser';
 import type { PageToBackgroundMessage } from '@/lib/messages';
 import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
-import type { PanelStore, SelectionView, TurnView } from '../store';
+import type { PageStep, PanelStore, SelectionView, TurnView } from '../store';
 import { Answer } from './Answer';
 
 export interface PanelProps {
@@ -156,6 +156,25 @@ function openOptions() {
   void browser.runtime.sendMessage(message).catch(() => {});
 }
 
+/** One line for a Mark: "Marked *Save*", "Pointed at an area of the page", "Labelled *Save* 2". */
+function MarkStep({ step }: { step: PageStep }) {
+  const target = step.target ? <em>{step.target}</em> : 'an area of the page';
+  switch (step.mark) {
+    case 'arrow':
+      return <>Pointed at {target}</>;
+    case 'highlight':
+      return <>Highlighted {target}</>;
+    case 'label':
+      return (
+        <>
+          Labelled {target} {step.number}
+        </>
+      );
+    default:
+      return <>Marked {target}</>;
+  }
+}
+
 // Memoised: while an answer streams, only the turn that changed re-renders.
 const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
   const sources = webSources(turn);
@@ -166,7 +185,7 @@ const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: (
       {turn.answer && <Answer text={turn.answer} />}
       {turn.steps.map((step, index) => (
         <p key={index} className="status page-step">
-          Marked <em>{step.target}</em>
+          <MarkStep step={step} />
         </p>
       ))}
       {(turn.searching || turn.status === 'waiting') && (

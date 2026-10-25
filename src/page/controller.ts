@@ -55,6 +55,9 @@ export function startPage() {
     const restorePanel = () => {
       if (panelWasVisible) panel?.show();
     };
+    // Keep the Marks out of the still, and out of the way while selecting.
+    const marksOwner = pageTools;
+    marksOwner?.setMarksHidden(true);
     try {
       await runSelection(fresh, settings, panelWasVisible, restorePanel);
     } catch (error) {
@@ -63,6 +66,8 @@ export function startPage() {
       panel?.store.setNotice(`Couldn't make that Selection: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       selecting = false;
+      // Back after a finished or cancelled Selection. (A fresh Conversation disposed them instead.)
+      marksOwner?.setMarksHidden(false);
     }
   }
 
@@ -72,9 +77,9 @@ export function startPage() {
     panelWasVisible: boolean,
     restorePanel: () => void,
   ) {
-    if (panelWasVisible) {
-      // Keep the Panel out of the still.
-      panel!.hide();
+    if (panelWasVisible || pageTools) {
+      // Keep the Panel and the Marks out of the still.
+      panel?.hide();
       await nextFrames(2);
     }
     const capture = await requestCapture();

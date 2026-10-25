@@ -20,7 +20,7 @@ import {
   text,
   type ScriptedPageToolCall,
 } from './testing/fake-model';
-import { marksOn, pageDocument } from './testing/page-document';
+import { marksOn, pageDocument, scrollWindow } from './testing/page-document';
 
 const selection = (data = 'aW1hZ2U='): SelectionInput => ({ image: { mediaType: 'image/png', data } });
 
@@ -692,7 +692,7 @@ describe('Conversation: Marks', () => {
     expect(seen).toMatch(/button "Save"/);
     expect((await mark().result).isError).toBeFalsy();
 
-    expect(events).toContainEqual({ type: 'mark', target: 'Notifications' });
+    expect(events).toContainEqual(expect.objectContaining({ type: 'mark', kind: 'box', target: 'Notifications' }));
     expect(events.at(-1)).toEqual({ type: 'done' });
     const [box, ...others] = marksOn(doc);
     expect(others).toEqual([]);
@@ -805,5 +805,218 @@ describe('Conversation: Marks', () => {
     expect(resultText(await mark.result)).toMatch(/look/);
     expect(marksOn(doc)).toEqual([]);
     expect(events.some((e) => e.type === 'mark')).toBe(false);
+  });
+});
+
+describe('Conversation: Mark kinds and Marks on a live page', () => {
+  const PAGE = `
+    <h1 data-rect="40,20,300,30">Settings</h1>
+    <button data-rect="400,200,80,30">Save</button>
+    <iframe src="https://video.example/embed/1" title="Product video" data-rect="40,300,480,270"></iframe>`;
+
+  function setupOnPage(body = PAGE) {
+    const doc = pageDocument(body);
+    const pageTools = createPageTools(doc, { drawOnPage: true });
+    return { doc, pageTools, ...setup({ pageTools }) };
+  }
+
+  /** Looks the page up, then draws one Mark per input (at the element `name` names, if any), then answers. */
+  function lookThenMarks(...marks: Record<string, unknown>[]) {
+    const look = pageToolCall('look');
+    const calls: ScriptedPageToolCall[] = [];
+    const script = async function* () {
+      yield look;
+      const seen = await look.result;
+      for (const { name, ...input } of marks) {
+        const call = pageToolCall('mark', name ? { ...input, element: refOf(seen, String(name)) } : input);
+        calls.push(call);
+        yield call;
+      }
+      yield* response([text('There.')]);
+    };
+    return { script, look, calls };
+  }
+
+  const SAVE = { left: 400, top: 200, width: 80, height: 30 };
+
+  it('draws a box, an arrow, a highlight and a numbered label, and tells the Panel which', async () => {
+    const { doc, model, events, conversation } = setupOnPage();
+    const { script, calls } = lookThenMarks(
+      { name: 'Save', kind: 'box' },
+      { name: 'Save', kind: 'arrow' },
+      { name: 'Settings', kind: 'highlight' },
+      { name: 'Save', kind: 'label', number: 2 },
+    );
+    model.respond(script);
+    await conversation.ask('How do I save?');
+
+    for (const call of calls) expect((await call.result).isError).toBeFalsy();
+    const marks = marksOn(doc);
+    expect(marks.map((m) => m.kind)).toEqual(['box', 'arrow', 'highlight', 'label']);
+    const [box, arrow, highlight, label] = marks;
+    // The box surrounds Save.
+    expect(box!.left).toBeLessThanOrEqual(400);
+    expect(box!.left + box!.width).toBeGreaterThanOrEqual(480);
+    // The arrow sits beside Save, ending at its edge, without covering it.
+    expect(arrow!.left + arrow!.width).toBeLessThanOrEqual(400);
+    expect(arrow!.left + arrow!.width).toBeGreaterThan(390);
+    expect(arrow!.top).toBeLessThan(215);
+    expect(arrow!.top + arrow!.height).toBeGreaterThan(215);
+    // The highlight covers the heading exactly.
+    expect(highlight).toMatchObject({ left: 40, top: 20, width: 300, height: 30 });
+    // The label shows its number on Save's top-left corner.
+    expect(label!.text).toBe('2');
+    expect(label!.left).toBeLessThan(400);
+    expect(label!.left + label!.width).toBeGreaterThan(400);
+
+    expect(events.filter((e) => e.type === 'mark')).toEqual([
+      { type: 'mark', kind: 'box', target: 'Save', area: SAVE },
+      { type: 'mark', kind: 'arrow', target: 'Save', area: SAVE },
+      { type: 'mark', kind: 'highlight', target: 'Settings', area: { left: 40, top: 20, width: 300, height: 30 } },
+      { type: 'mark', kind: 'label', number: 2, target: 'Save', area: SAVE },
+    ]);
+  });
+
+  it('numbers labels on from the last one by default, starting again with the next answer', async () => {
+    const { doc, model, conversation } = setupOnPage();
+    model.respond(lookThenMarks({ name: 'Settings', kind: 'label' }, { name: 'Save', kind: 'label' }).script);
+    await conversation.ask('What are the steps?');
+    expect(marksOn(doc).map((m) => m.text)).toEqual(['1', '2']);
+
+    model.respond(lookThenMarks({ name: 'Save', kind: 'label' }).script);
+    await conversation.ask('And again?');
+    expect(marksOn(doc).map((m) => m.text)).toEqual(['1']);
+  });
+
+  it('refuses an unknown kind of Mark', async () => {
+    const { doc, model, events, conversation } = setupOnPage();
+    const { script, calls } = lookThenMarks({ name: 'Save', kind: 'circle' });
+    model.respond(script);
+    await conversation.ask('Where?');
+    expect(await calls[0]!.result).toMatchObject({ isError: true });
+    expect(resultText(await calls[0]!.result)).toMatch(/box, arrow, highlight, label/);
+    expect(marksOn(doc)).toEqual([]);
+    expect(events.some((e) => e.type === 'mark')).toBe(false);
+  });
+
+  it('marks an area of the visible page when there is no element to point at', async () => {
+    const { doc, model, events, conversation } = setupOnPage();
+    const spike = { left: 600, top: 120, width: 40, height: 60 };
+    const { script, calls } = lookThenMarks({ kind: 'box', area: spike }, { kind: 'arrow', area: spike });
+    model.respond(script);
+    await conversation.ask('Where is the spike?');
+
+    for (const call of calls) expect((await call.result).isError).toBeFalsy();
+    const [box, arrow] = marksOn(doc);
+    expect(box!.left).toBeLessThanOrEqual(600);
+    expect(box!.top).toBeLessThanOrEqual(120);
+    expect(box!.left + box!.width).toBeGreaterThanOrEqual(640);
+    expect(box!.top + box!.height).toBeGreaterThanOrEqual(180);
+    expect(arrow!.left + arrow!.width).toBeLessThanOrEqual(600);
+    // The Panel hears of an area of the page, with no element name.
+    expect(events.filter((e) => e.type === 'mark')).toEqual([
+      { type: 'mark', kind: 'box', area: spike },
+      { type: 'mark', kind: 'arrow', area: spike },
+    ]);
+  });
+
+  it('keeps an area to the visible page, and refuses one wholly outside it', async () => {
+    const { doc, model, events, conversation } = setupOnPage();
+    const { script, calls } = lookThenMarks(
+      { kind: 'highlight', area: { left: 1000, top: -20, width: 100, height: 60 } },
+      { kind: 'box', area: { left: 10, top: 900, width: 50, height: 50 } },
+      { kind: 'box', area: { left: 10, top: 10, width: 0, height: 50 } },
+      { kind: 'box', area: { left: 10, top: 10, width: 10, height: 10 }, element: 'e1' },
+    );
+    model.respond(script);
+    await conversation.ask('Where?');
+
+    expect((await calls[0]!.result).isError).toBeFalsy();
+    expect(marksOn(doc)).toEqual([expect.objectContaining({ kind: 'highlight', left: 1000, top: 0, width: 24, height: 40 })]);
+    expect(await calls[1]!.result).toMatchObject({ isError: true });
+    expect(resultText(await calls[1]!.result)).toMatch(/outside the visible page/);
+    expect(await calls[2]!.result).toMatchObject({ isError: true });
+    expect(await calls[3]!.result).toMatchObject({ isError: true });
+    expect(events.filter((e) => e.type === 'mark')).toHaveLength(1);
+  });
+
+  it('lists a frame embedded from another site as one element, so a Mark can point at it as a whole', async () => {
+    const { doc, model, events, conversation } = setupOnPage(`
+      <h1>Watch</h1>
+      <iframe src="https://video.example/embed/1" title="Product video" data-rect="40,300,480,270"></iframe>`);
+    const frame = doc.querySelector('iframe')!;
+    // Whatever the frame holds stays out of reach, even if the page could see into it.
+    const inner = frame.contentDocument!;
+    if (!inner.documentElement) inner.append(inner.createElement('html'));
+    inner.documentElement!.innerHTML = '<body><button>Buy now</button><a href="/x">Inside link</a></body>';
+    const { script, look, calls } = lookThenMarks({ name: 'Product video', kind: 'box' });
+    model.respond(script);
+    await conversation.ask('Which video?');
+
+    const seen = resultText(await look.result);
+    expect(seen.match(/iframe/g)).toHaveLength(1);
+    expect(seen).toMatch(/iframe "Product video"/);
+    expect(seen).not.toMatch(/Buy now|Inside link/);
+    expect((await calls[0]!.result).isError).toBeFalsy();
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'mark', target: 'Product video', area: { left: 40, top: 300, width: 480, height: 270 } }),
+    );
+    expect(marksOn(doc)).toHaveLength(1);
+  });
+
+  it('keeps element Marks on their element as the page scrolls and the window resizes', async () => {
+    const { doc, model, conversation } = setupOnPage();
+    model.respond(lookThenMarks({ name: 'Save', kind: 'highlight' }, { name: 'Save', kind: 'arrow' }).script);
+    await conversation.ask('Where is Save?');
+    const save = doc.querySelector('button')!;
+    const view = doc.defaultView!;
+
+    save.setAttribute('data-rect', '400,50,80,30');
+    scrollWindow(doc, 0, 150);
+    expect(marksOn(doc)[0]).toMatchObject({ left: 400, top: 50, width: 80, height: 30 });
+    expect(marksOn(doc)[1]!.top).toBeLessThan(65);
+    expect(marksOn(doc)[1]!.top + marksOn(doc)[1]!.height).toBeGreaterThan(65);
+
+    // Scrolling inside a scroller on the page moves it too.
+    save.setAttribute('data-rect', '400,10,80,30');
+    doc.body.dispatchEvent(new view.Event('scroll'));
+    expect(marksOn(doc)[0]).toMatchObject({ top: 10 });
+
+    save.setAttribute('data-rect', '200,10,60,24');
+    view.dispatchEvent(new view.Event('resize'));
+    expect(marksOn(doc)[0]).toMatchObject({ left: 200, top: 10, width: 60, height: 24 });
+
+    // An element that leaves the page takes its Marks with it.
+    save.remove();
+    view.dispatchEvent(new view.Event('resize'));
+    expect(marksOn(doc).map((m) => m.visible)).toEqual([false, false]);
+  });
+
+  it('keeps a Mark at an area with the page as it scrolls', async () => {
+    const { doc, model, conversation } = setupOnPage();
+    model.respond(lookThenMarks({ kind: 'highlight', area: { left: 600, top: 400, width: 40, height: 60 } }).script);
+    await conversation.ask('Where is the spike?');
+
+    scrollWindow(doc, 0, 100);
+    expect(marksOn(doc)[0]).toMatchObject({ left: 600, top: 300, width: 40, height: 60 });
+    scrollWindow(doc, 30, 0);
+    expect(marksOn(doc)[0]).toMatchObject({ left: 570, top: 400 });
+  });
+
+  it('hides Marks during Selection Mode, including ones drawn meanwhile, and brings them back after', async () => {
+    const { doc, pageTools, model, conversation } = setupOnPage();
+    model.respond(lookThenMarks({ name: 'Save', kind: 'box' }).script);
+    await conversation.ask('Where is Save?');
+    expect(marksOn(doc).map((m) => m.visible)).toEqual([true]);
+
+    pageTools.setMarksHidden(true);
+    expect(marksOn(doc).map((m) => m.visible)).toEqual([false]);
+    // An answer still streaming may draw while the user selects.
+    model.respond(lookThenMarks({ name: 'Settings', kind: 'arrow' }).script);
+    await conversation.ask('And the heading?');
+    expect(marksOn(doc).map((m) => m.visible)).toEqual([false]);
+
+    pageTools.setMarksHidden(false);
+    expect(marksOn(doc).map((m) => [m.kind, m.visible])).toEqual([['arrow', true]]);
   });
 });

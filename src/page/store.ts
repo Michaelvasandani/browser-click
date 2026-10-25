@@ -1,6 +1,7 @@
 import { Conversation, type ConversationEvent, type ModelClient, type Source } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
+import type { MarkKind, ViewportRect } from '@/lib/marks';
 import type { PageTools } from '@/lib/page-tools';
 import type { CapturedImage } from './overlay';
 
@@ -12,7 +13,14 @@ export interface SelectionView {
 }
 
 /** Something the Assistant did on the page during an answer, shown as one line in it. */
-export type PageStep = { kind: 'mark'; target: string };
+export type PageStep = {
+  kind: 'mark';
+  mark: MarkKind;
+  /** The element's name; absent for a Mark at an area of the page. */
+  target?: string;
+  /** A label's number. */
+  number?: number;
+};
 
 export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'stopped' | 'error' | 'refused';
 
@@ -60,6 +68,8 @@ export class PanelStore {
     settings: PageSettings,
     client: ModelClient,
     pageTools?: PageTools,
+    /** Told where each Mark's target is in the viewport, so the Panel can move out of its way. */
+    private readonly onMarkDrawn?: (area: ViewportRect) => void,
   ) {
     this.conversation = new Conversation({
       client,
@@ -157,7 +167,11 @@ export class PanelStore {
         break;
       case 'mark': {
         const turn = this.state.turns.at(-1);
-        if (turn) this.updateLastTurn({ steps: [...turn.steps, { kind: 'mark', target: event.target }] });
+        if (turn) {
+          const step: PageStep = { kind: 'mark', mark: event.kind, target: event.target, number: event.number };
+          this.updateLastTurn({ steps: [...turn.steps, step] });
+        }
+        this.onMarkDrawn?.(event.area);
         break;
       }
       case 'marks-cleared':

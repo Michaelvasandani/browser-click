@@ -75,6 +75,22 @@ The in-browser flow is checked by hand before a release. Unit tests (`npm test`)
 - [ ] Try web search with each of the three models: none is rejected for the tool version.
 - [ ] If your organization has web search disabled, the Panel says Anthropic rejected the web search tool and offers **Open options**.
 
+## Marks (Claude Code backend, "Draw on the page" on)
+
+Use a settings page with toggles and buttons (for example GitHub's notification settings), a page with a chart (a stock price chart) and a page with an embedded video from another site (a blog post with a YouTube embed).
+
+- [ ] Ask "where do I turn off email notifications?": a box appears around the right toggle, not offset from it, and the answer shows "Marked *…*".
+- [ ] Ask for the steps to do something ("show me, step by step, how to save this"): numbered labels 1, 2, 3 sit on the top-left corners of the right elements, and the answer shows one "Labelled *…* N" line per label.
+- [ ] Ask it to point with an arrow and to highlight a heading: the arrow sits just left of its target (or just right of it when the target is at the window's left edge) and points at it; the highlight covers the heading without hiding its text.
+- [ ] On the chart, select the chart and ask "where is the biggest spike?": a Mark lands on the spike itself, and the answer line says "an area of the page".
+- [ ] On the page with an embed, ask "which video is this about?": a Mark surrounds the whole embedded video. The Assistant mentions nothing from inside the video player.
+- [ ] Clicks, hovers and text selection all reach the page through the Marks.
+- [ ] Scroll the page slowly, then fast, with the mouse wheel and with the scrollbar: element Marks stay on their elements and area Marks move with the page. Scroll inside a scrollable box on the page that holds a marked element: its Mark follows.
+- [ ] Resize the window so the page reflows: element Marks follow their elements.
+- [ ] Draw a Mark under the Panel (drag the Panel over the marked element first, then ask again): the Panel moves aside so the target is visible, stays fully inside the window, and keeps its size. In a small window where it can't clear the target, it stays inside the window covering as little of it as it can.
+- [ ] With Marks on the page, click **Add selection**: the Marks disappear before the still is taken (they are not in the new Selection's thumbnail) and stay hidden while selecting. After finishing the Selection, and separately after cancelling with `Esc`, the Marks come back where they were.
+- [ ] Ask the next question: the previous answer's Marks disappear. Close the Panel: every Mark disappears.
+
 ## Errors
 
 - [ ] With a wrong API key, the Panel says the key wasn't accepted, with **Retry** and **Open options**. After fixing the key, **Retry** answers the same question.

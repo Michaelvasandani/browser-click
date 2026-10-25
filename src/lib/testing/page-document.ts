@@ -33,8 +33,27 @@ function parseBox(value: string): Box {
   return { left, top, width, height };
 }
 
+export interface MarkOnPage extends Box {
+  /** box, arrow, highlight or label. */
+  kind: string;
+  /** The Mark's own text, such as a label's number. */
+  text: string;
+  /** False while the Marks layer, or this Mark, is hidden. */
+  visible: boolean;
+  /** The layer's pointer-events style. */
+  pointerEvents: string;
+}
+
+/** Make the window report this scroll position, as a scroll would (jsdom has no layout). */
+export function scrollWindow(doc: Document, x: number, y: number) {
+  const view = doc.defaultView!;
+  Object.defineProperty(view, 'scrollX', { value: x, configurable: true });
+  Object.defineProperty(view, 'scrollY', { value: y, configurable: true });
+  view.dispatchEvent(new view.Event('scroll'));
+}
+
 /** The Marks drawn on the document, as the boxes they occupy in the viewport. */
-export function marksOn(doc: Document): (Box & { pointerEvents: string })[] {
+export function marksOn(doc: Document): MarkOnPage[] {
   const layer = doc.querySelector<HTMLElement>('browser-click-marks');
   const root = layer?.shadowRoot;
   if (!layer || !root) return [];
@@ -43,6 +62,9 @@ export function marksOn(doc: Document): (Box & { pointerEvents: string })[] {
     top: parseFloat(mark.style.top),
     width: parseFloat(mark.style.width),
     height: parseFloat(mark.style.height),
+    kind: mark.dataset.mark ?? '',
+    text: mark.textContent ?? '',
+    visible: layer.style.display !== 'none' && mark.style.display !== 'none',
     pointerEvents: layer.style.pointerEvents,
   }));
 }
