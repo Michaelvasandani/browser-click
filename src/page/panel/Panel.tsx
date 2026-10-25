@@ -11,7 +11,8 @@ import {
 import { browser } from 'wxt/browser';
 import type { PageToBackgroundMessage } from '@/lib/messages';
 import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
-import type { PanelStore, SelectionView, TurnView } from '../store';
+import type { PageActionKind, PageActionOutcome } from '@/lib/page-tools';
+import type { PageStep, PanelStore, SelectionView, TurnView } from '../store';
 import { Answer } from './Answer';
 
 export interface PanelProps {
@@ -157,6 +158,15 @@ function openOptions() {
 }
 
 // Memoised: while an answer streams, only the turn that changed re-renders.
+/** How each Page Action reads in its line, by outcome: "Scrolled to Billing", "Didn't scroll to Billing". */
+const PAGE_ACTION_WORDS: Record<PageActionKind, Record<PageActionOutcome, string>> = {
+  scroll: { done: 'Scrolled to', refused: "Didn't scroll to" },
+};
+
+function stepWords(step: PageStep): string {
+  return step.kind === 'mark' ? 'Marked' : PAGE_ACTION_WORDS[step.action][step.outcome];
+}
+
 const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
   const sources = webSources(turn);
   return (
@@ -165,8 +175,8 @@ const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: (
       <p className="user-question">{turn.question}</p>
       {turn.answer && <Answer text={turn.answer} />}
       {turn.steps.map((step, index) => (
-        <p key={index} className="status page-step">
-          Marked <em>{step.target}</em>
+        <p key={index} className="status page-step" data-outcome={step.kind === 'page-action' ? step.outcome : undefined}>
+          {stepWords(step)} <em>{step.target}</em>
         </p>
       ))}
       {(turn.searching || turn.status === 'waiting') && (

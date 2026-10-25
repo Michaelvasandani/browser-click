@@ -9,6 +9,7 @@ export interface PageSettings {
   model: ModelId;
   webSearch: boolean;
   drawOnPage: boolean;
+  actOnPage: boolean;
 }
 
 /** Background → page: the user clicked the toolbar icon. */
@@ -68,7 +69,15 @@ export const CLAUDE_CODE_PORT = 'claude-code';
 /** Page → Background over the Claude Code port. */
 export type ClaudeCodePortRequest =
   /** First message: start claude for this Conversation (or resume its saved session). */
-  | { type: 'open'; model: ModelId; webSearch: boolean; drawOnPage: boolean; title: string; sessionId?: string }
+  | {
+      type: 'open';
+      model: ModelId;
+      webSearch: boolean;
+      drawOnPage: boolean;
+      actOnPage: boolean;
+      title: string;
+      sessionId?: string;
+    }
   /** Send the newest user message; claude keeps the history itself. */
   | { type: 'ask'; content: ClaudeCodeUserContent }
   /** Interrupt the answer being generated. */

@@ -807,3 +807,197 @@ describe('Conversation: Marks', () => {
     expect(events.some((e) => e.type === 'mark')).toBe(false);
   });
 });
+
+describe('Conversation: scrolling to things on the page', () => {
+  /** A long settings page: Billing is far below the fold. */
+  const LONG_PAGE = `
+    <h1 data-rect="10,10,300,30">Settings</h1>
+    <button data-rect="10,60,80,30">Save</button>
+    <h2 data-rect="10,2000,300,30">Billing</h2>
+    <button data-rect="10,2050,120,30">Change plan</button>`;
+
+  /** The Page Context the Assistant was sent with the Selection. */
+  const LONG_PAGE_CONTEXT: PageContext = {
+    title: 'Settings',
+    url: 'https://example.com/settings',
+    text: 'Settings\nSave\nBilling\nChange plan',
+    truncated: false,
+  };
+
+  function setupOnPage(body: string, { drawOnPage = true, actOnPage = true } = {}) {
+    const doc = pageDocument(body);
+    const pageTools = createPageTools(doc, { drawOnPage, actOnPage });
+    const setupResult = setup({ pageTools });
+    setupResult.conversation.addSelection({ ...selection(), pageContext: LONG_PAGE_CONTEXT });
+    return { doc, pageTools, ...setupResult };
+  }
+
+  it('scrolls to an element named in the Page Context without asking, and says so', async () => {
+    const { model, events, conversation } = setupOnPage(LONG_PAGE);
+    const scroll = pageToolCall('scroll_to', { name: 'Billing' });
+    model.respond([scroll, ...response([text('Billing is here.')])]);
+    await conversation.ask('Where do I change my plan?');
+
+    const result = await scroll.result;
+    expect(result.isError).toBeFalsy();
+    expect(resultText(result)).toMatch(/Scrolled to .*heading "Billing"/);
+    expect(events).toContainEqual({ type: 'page-action', action: 'scroll', target: 'Billing', outcome: 'done' });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('returns the elements in view after the scroll, so the Assistant can work in steps', async () => {
+    const { model, conversation } = setupOnPage(LONG_PAGE);
+    const look = pageToolCall('look');
+    const scroll = pageToolCall('scroll_to', { name: 'billing' });
+    model.respond([look, scroll, ...response([text('ok')])]);
+    await conversation.ask('Where do I change my plan?');
+
+    const before = resultText(await look.result);
+    expect(before).toMatch(/button "Save"/);
+    expect(before).not.toMatch(/Change plan/);
+    const after = resultText(await scroll.result);
+    expect(after).toMatch(/viewport: 1024x768/i);
+    expect(after).toMatch(/button "Change plan"/);
+    expect(after).not.toMatch(/button "Save"/);
+    // A reference from the fresh list works like one from look.
+    expect(refOf(await scroll.result, 'Change plan')).toMatch(/^e\d+$/);
+  });
+
+  it('scrolls to an element the Assistant looked up', async () => {
+    const { model, events, conversation } = setupOnPage(LONG_PAGE);
+    const look = pageToolCall('look');
+    let scroll: ScriptedPageToolCall | undefined;
+    model.respond(async function* () {
+      yield look;
+      scroll = pageToolCall('scroll_to', { element: refOf(await look.result, 'Save') });
+      yield scroll;
+      yield* response([text('ok')]);
+    });
+    await conversation.ask('Where is Save?');
+
+    expect((await scroll!.result).isError).toBeFalsy();
+    expect(events).toContainEqual({ type: 'page-action', action: 'scroll', target: 'Save', outcome: 'done' });
+  });
+
+  /** Asks to scroll to `input`, and returns the result, the events and whether the page moved. */
+  async function refusedScroll(body: string, input: Record<string, unknown>) {
+    const { doc, model, events, conversation } = setupOnPage(body);
+    const scroll = pageToolCall('scroll_to', input);
+    model.respond([scroll, ...response([text('ok')])]);
+    await conversation.ask('Show me.');
+    const result = await scroll.result;
+    const moved = doc.querySelector('h1')!.getBoundingClientRect().top !== 10;
+    return { result, events, moved };
+  }
+
+  it('refuses a name the Page Context does not contain, so scrolling cannot search the page', async () => {
+    const page = `${LONG_PAGE}<h2 data-rect="10,3000,300,30">Danger zone</h2>`;
+    const { result, events, moved } = await refusedScroll(page, { name: 'Danger zone' });
+
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(/not in the Page Context/);
+    expect(resultText(result)).toMatch(/Visible elements/);
+    expect(moved).toBe(false);
+    expect(events).toContainEqual({ type: 'page-action', action: 'scroll', target: 'Danger zone', outcome: 'refused' });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('refuses part of a name, even one the Page Context contains', async () => {
+    const { result, moved } = await refusedScroll(LONG_PAGE, { name: 'Bill' });
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(/named exactly "Bill"/);
+    expect(moved).toBe(false);
+  });
+
+  it('refuses an element inside the Panel', async () => {
+    const page = `${LONG_PAGE}<browser-click-panel><button data-rect="10,2500,80,30">Change plan</button></browser-click-panel>`;
+    const doc = pageDocument(page);
+    // Only the Panel's copy exists once the page's own button is gone.
+    doc.querySelector('body > button:last-of-type')!.remove();
+    const pageTools = createPageTools(doc, { drawOnPage: true, actOnPage: true });
+    const { model, conversation } = setup({ pageTools });
+    conversation.addSelection({ ...selection(), pageContext: LONG_PAGE_CONTEXT });
+    const scroll = pageToolCall('scroll_to', { name: 'Change plan' });
+    model.respond([scroll, ...response([text('ok')])]);
+    await conversation.ask('Show me.');
+
+    expect((await scroll.result).isError).toBe(true);
+    expect(doc.querySelector('h1')!.getBoundingClientRect().top).toBe(10);
+  });
+
+  it('refuses a reference the Assistant never looked up', async () => {
+    const { result, events } = await refusedScroll(LONG_PAGE, { element: 'e42' });
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(/look/);
+    expect(events).toContainEqual({ type: 'page-action', action: 'scroll', target: 'e42', outcome: 'refused' });
+  });
+
+  it('refuses every name when the Assistant was sent no Page Context', async () => {
+    const doc = pageDocument(LONG_PAGE);
+    const { model, conversation } = setup({ pageTools: createPageTools(doc, { drawOnPage: true, actOnPage: true }) });
+    conversation.addSelection(selection());
+    const scroll = pageToolCall('scroll_to', { name: 'Billing' });
+    model.respond([scroll, ...response([text('ok')])]);
+    await conversation.ask('Show me.');
+    expect((await scroll.result).isError).toBe(true);
+  });
+
+  it('remembers the Page Context of earlier questions', async () => {
+    const { model, events, conversation } = setupOnPage(LONG_PAGE);
+    model.respond(response([text('ok')]));
+    await conversation.ask('What is this page?');
+    const scroll = pageToolCall('scroll_to', { name: 'Billing' });
+    model.respond([scroll, ...response([text('ok')])]);
+    await conversation.ask('And billing?');
+    expect((await scroll.result).isError).toBeFalsy();
+    expect(events).toContainEqual({ type: 'page-action', action: 'scroll', target: 'Billing', outcome: 'done' });
+  });
+
+  const offeredNames = (pageTools: ReturnType<typeof createPageTools>) => pageTools.offered.map((t) => t.name);
+
+  it('offers scroll_to and describes it only when acting on the page is on', async () => {
+    const { pageTools, model, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: false, actOnPage: true });
+    expect(offeredNames(pageTools)).toEqual(['look', 'scroll_to']);
+    model.respond(response([text('ok')]));
+    await conversation.ask('Where is it?');
+    const system = String(model.lastRequest.system);
+    expect(system).toMatch(/scroll_to/);
+    expect(system).not.toMatch(/\bmarks?\b/i);
+  });
+
+  it('describes both Marks and scrolling when both are on', async () => {
+    const { pageTools, model, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: true, actOnPage: true });
+    expect(offeredNames(pageTools)).toEqual(['look', 'mark', 'scroll_to']);
+    model.respond(response([text('ok')]));
+    await conversation.ask('Where is it?');
+    const system = String(model.lastRequest.system);
+    expect(system).toMatch(/scroll_to/);
+    expect(system).toMatch(/\bmarks?\b/i);
+  });
+
+  it('refuses scroll_to when acting on the page is off, and says nothing about it', async () => {
+    const { doc, pageTools, model, events, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: true, actOnPage: false });
+    expect(offeredNames(pageTools)).toEqual(['look', 'mark']);
+    const scroll = pageToolCall('scroll_to', { name: 'Billing' });
+    model.respond([scroll, ...response([text('ok')])]);
+    await conversation.ask('Where is it?');
+
+    expect(String(model.lastRequest.system)).not.toMatch(/scroll/i);
+    expect(await scroll.result).toMatchObject({ isError: true });
+    expect(resultText(await scroll.result)).toMatch(/not available/);
+    expect(doc.querySelector('h1')!.getBoundingClientRect().top).toBe(10);
+    expect(events.some((e) => e.type === 'page-action')).toBe(false);
+  });
+
+  it('offers nothing with both switches off, as before page tools', async () => {
+    const { pageTools, model, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: false, actOnPage: false });
+    expect(pageTools.offered).toEqual([]);
+    model.respond(response([text('ok')]));
+    await conversation.ask('Where is it?');
+    const { model: plainModel, conversation: plain } = setup();
+    plain.addSelection({ ...selection(), pageContext: LONG_PAGE_CONTEXT });
+    plainModel.respond(response([text('ok')]));
+    await plain.ask('Where is it?');
+    expect(model.lastRequest).toEqual(plainModel.lastRequest);
+  });
+});

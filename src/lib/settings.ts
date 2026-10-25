@@ -19,6 +19,8 @@ export interface Settings {
   webSearch: boolean;
   /** Let the Assistant draw Marks over the page (Claude Code backend only). */
   drawOnPage: boolean;
+  /** Let the Assistant take Page Actions (Claude Code backend only). Never skips an approval. */
+  actOnPage: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -27,6 +29,7 @@ export const DEFAULT_SETTINGS: Settings = {
   model: 'claude-opus-5-5',
   webSearch: true,
   drawOnPage: true,
+  actOnPage: false,
 };
 
 /** The subset of a chrome.storage area that settings need. */
@@ -45,6 +48,7 @@ export async function loadSettings(storage: SettingsStorage): Promise<Settings> 
     model: MODELS.some((m) => m.id === stored.model) ? (stored.model as ModelId) : DEFAULT_SETTINGS.model,
     webSearch: typeof stored.webSearch === 'boolean' ? stored.webSearch : DEFAULT_SETTINGS.webSearch,
     drawOnPage: typeof stored.drawOnPage === 'boolean' ? stored.drawOnPage : DEFAULT_SETTINGS.drawOnPage,
+    actOnPage: stored.actOnPage === true,
   };
 }
 

@@ -88,3 +88,10 @@ The in-browser flow is checked by hand before a release. Unit tests (`npm test`)
 - [ ] Clicking the toolbar icon with a Panel open and making a Selection replaces the Conversation with a new one, without asking.
 - [ ] Closing the Panel while an answer streams stops the request.
 - [ ] Reloading the page removes the Panel; nothing of the Conversation is kept.
+
+## Scrolling to things (Claude Code, "Act on the page" on)
+
+- [ ] On a fresh install "Act on the page" is off on the options page; turning it on and saving sticks.
+- [ ] On a long settings page, select the top and ask where to change something far below. The page scrolls to it without asking, and the answer shows "Scrolled to *Billing*" (or similar).
+- [ ] Asking for something that isn't on the page doesn't move the page; if Claude tried, the answer shows "Didn't scroll to *…*".
+- [ ] With "Act on the page" off, the page never scrolls and no scroll lines appear.

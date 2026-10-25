@@ -59,6 +59,7 @@ export function openClaudeCodeClient(settings: PageSettings, title: string): Cla
       model: settings.model,
       webSearch: settings.webSearch,
       drawOnPage: settings.drawOnPage,
+      actOnPage: settings.actOnPage,
       title,
       sessionId: resumeId,
     };
