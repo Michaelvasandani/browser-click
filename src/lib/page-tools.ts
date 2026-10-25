@@ -130,7 +130,7 @@ export interface PageToolSettings {
 const LOOK: PageToolDefinition = {
   name: 'look',
   description:
-    'List the elements of the page that are currently visible, each with a short reference (such as e3), its role and its name, plus the viewport size. Call it before pointing at anything, and again after the page changes. Set image to also get a picture of the visible page, for content the list cannot describe, such as charts, canvases and video; ask for it only when you need it. The picture may show the browser-click panel, which is not part of the page.',
+    'List the elements of the page that are currently visible, each with a short reference (such as e3), its role and its name, plus the viewport size. Call it before pointing at anything, and again after the page changes. Set image to also get a picture of the visible page, for content the list cannot describe, such as charts, canvases and video; ask for it only when you need it. The picture may show the browser-click Panel, which is not part of the page.',
   inputSchema: {
     type: 'object',
     properties: {

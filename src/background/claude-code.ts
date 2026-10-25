@@ -200,7 +200,7 @@ export class ClaudeCodeTurns {
 }
 
 const STOPPED_CALL = 'The reader stopped this answer, so this step did not happen.';
-const CLOSED_CALL = 'The browser-click panel was closed or the page went away, so this step did not happen.';
+const CLOSED_CALL = 'The browser-click Panel was closed or the page went away, so this step did not happen.';
 
 const errorResult = (text: string): PageToolResult => ({ content: [{ type: 'text', text }], isError: true });
 
