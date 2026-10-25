@@ -1,3 +1,4 @@
+import type { CaptureResponse } from './messages';
 import { MARK_KINDS, MarksLayer, type MarkAnchor, type MarkKind, type ViewportRect } from './marks';
 
 /**
@@ -27,9 +28,29 @@ export interface PageToolCall {
 
 /** What a page tool returns to the model. The same shape as an MCP tool result. */
 export interface PageToolResult {
-  content: { type: 'text'; text: string }[];
+  content: ({ type: 'text'; text: string } | PageToolImage)[];
   isError?: boolean;
 }
+
+/** An image in a page tool result, in MCP's shape. Only look returns one. */
+export interface PageToolImage {
+  type: 'image';
+  /** Base64, without the data URL prefix. */
+  data: string;
+  mimeType: string;
+}
+
+/**
+ * Captures the visible tab through the Background, as Selection Mode does.
+ * Resolves with a data URL already scaled to fit MAX_IMAGE_DATA_CHARS, or why not.
+ */
+export type CaptureVisiblePage = () => Promise<CaptureResponse>;
+
+/**
+ * The most base64 an image in a look result may carry. The result travels to
+ * the native host inside one native message, and Chrome caps those at 1 MB.
+ */
+export const MAX_IMAGE_DATA_CHARS = 700_000;
 
 /** Something a page tool call did that the Panel shows as a line in the answer. */
 export type PageToolEffect = MarkEffect;
@@ -60,8 +81,14 @@ export interface PageToolSettings {
 const LOOK: PageToolDefinition = {
   name: 'look',
   description:
-    'List the elements of the page that are currently visible, each with a short reference (such as e3), its role and its name, plus the viewport size. Call it before pointing at anything, and again after the page changes.',
-  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    'List the elements of the page that are currently visible, each with a short reference (such as e3), its role and its name, plus the viewport size. Call it before pointing at anything, and again after the page changes. Set image to also get a picture of the visible page, for content the list cannot describe, such as charts, canvases and video; ask for it only when you need it. The picture may show the browser-click panel, which is not part of the page.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      image: { type: 'boolean', description: 'Also return an image of the visible page. Off by default.' },
+    },
+    additionalProperties: false,
+  },
 };
 
 const MARK: PageToolDefinition = {
@@ -135,17 +162,53 @@ const UNLISTED_ROLES = new Set(['presentation', 'none', 'generic', 'group', 'reg
 
 const MAX_NAME_CHARS = 80;
 
-export function createPageTools(doc: Document, settings: PageToolSettings): PageTools {
+export interface PageToolsOptions {
+  /** How look takes an image of the visible page. Without it, look offers no image. */
+  capture?: CaptureVisiblePage;
+}
+
+export function createPageTools(doc: Document, settings: PageToolSettings, options: PageToolsOptions = {}): PageTools {
   const offered = offeredPageTools(settings);
   const refs = new Refs();
   let marks: MarksLayer | null = null;
   // The highest label number in the current answer's Marks, so labels count on by default.
   let labelsDrawn = 0;
   // Marks are hidden during Selection Mode.
-  let hidden = false;
+  let hiddenForSelection = false;
 
-  const tools: Record<PageToolName, (input: Record<string, unknown>) => PageToolOutcome> = {
-    look: () => ({ result: ok(describeVisible(doc, refs)) }),
+  /** An image of the visible page, without browser-click's Marks, or why there is none. */
+  async function captureImage(): Promise<PageToolImage | string> {
+    if (!options.capture) return 'Images of the page are not available here.';
+    // A capture now would show Selection Mode's still and shade, not the page.
+    if (doc.querySelector('browser-click-overlay')) return 'The reader is making a Selection (Selection Mode is showing).';
+    const hidden = marks?.hide();
+    let response: CaptureResponse;
+    try {
+      response = await options.capture();
+    } catch (error) {
+      response = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (hidden) marks?.show();
+    }
+    if (!response.ok) return response.error;
+    const match = /^data:([^;,]+);base64,(.*)$/s.exec(response.dataUrl);
+    if (!match) return 'The capture was not an image.';
+    const [, mimeType, data] = match;
+    if (data!.length > MAX_IMAGE_DATA_CHARS) return 'The image was too large to send.';
+    return { type: 'image', data: data!, mimeType: mimeType! };
+  }
+
+  const tools: Record<PageToolName, (input: Record<string, unknown>) => PageToolOutcome | Promise<PageToolOutcome>> = {
+    look: async (input) => {
+      if (input.image !== true) return { result: ok(describeVisible(doc, refs)) };
+      const image = await captureImage();
+      // Listed after the capture, so the list matches the picture.
+      const list = describeVisible(doc, refs);
+      if (typeof image === 'string') {
+        return { result: refused(`Couldn't take an image of the page: ${image}\nThe element list is below.\n\n${list}`) };
+      }
+      return { result: { content: [{ type: 'text', text: list }, image] } };
+    },
     mark: (input) => {
       const kind = input.kind ?? 'box';
       if (!MARK_KINDS.includes(kind as MarkKind)) {
@@ -161,7 +224,7 @@ export function createPageTools(doc: Document, settings: PageToolSettings): Page
       const where = markTarget(input, refs, viewportOf(doc));
       if ('refusal' in where) return { result: refused(where.refusal) };
       marks ??= new MarksLayer(doc);
-      if (hidden) marks.setHidden(true);
+      if (hiddenForSelection) marks.setHidden(true);
       marks.draw(kind as MarkKind, where.anchor, number);
       if (kind === 'label') labelsDrawn = Math.max(labelsDrawn, number!);
       const effect: MarkEffect = { type: 'mark', kind: kind as MarkKind, area: where.area };
@@ -179,7 +242,7 @@ export function createPageTools(doc: Document, settings: PageToolSettings): Page
       if (!tool) return { result: refused(`The ${JSON.stringify(call.name)} tool is not available.`) };
       try {
         const input = call.input && typeof call.input === 'object' ? (call.input as Record<string, unknown>) : {};
-        return tools[tool.name](input);
+        return await tools[tool.name](input);
       } catch (error) {
         return { result: refused(`The ${tool.name} tool failed: ${error instanceof Error ? error.message : String(error)}`) };
       }
@@ -189,7 +252,7 @@ export function createPageTools(doc: Document, settings: PageToolSettings): Page
       return marks?.clear() ?? false;
     },
     setMarksHidden(hide) {
-      hidden = hide;
+      hiddenForSelection = hide;
       marks?.setHidden(hide);
     },
     dispose() {
