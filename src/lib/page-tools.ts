@@ -180,7 +180,7 @@ const SCROLL_TO: PageToolDefinition = {
 const CLICK: PageToolDefinition = {
   name: 'click',
   description:
-    'Click a button or link in view, when that is the obvious next step for what the reader asked. Takes an element reference from the latest look; never coordinates. Each click waits for the reader to allow it, and they may say no: if so, carry on without it. Some clicks are always refused: anything that submits a form, links that leave the page, and content embedded from other sites. Returns the elements in view afterwards.',
+    'Click a button or link in view, when that is the obvious next step for what the reader asked. Takes an element reference from the latest look; never coordinates. Each click waits for the reader to allow it, and they may say no: if so, carry on without it. Some clicks are always refused: anything that submits a form, links to other sites, new tabs or downloads, and content embedded from other sites. A link to another page of this site is cancelled if the page does not handle it itself. Returns the elements in view afterwards.',
   inputSchema: {
     type: 'object',
     properties: { element: { type: 'string', description: 'An element reference from look, such as e3.' } },
@@ -206,6 +206,13 @@ const TYPE: PageToolDefinition = {
 
 /** How long a click or typing is given to change the page before the elements in view are listed. */
 const ACTION_SETTLE_MS = 150;
+
+/**
+ * How long after a click or typing the browser still asks "Leave site?"
+ * before the page unloads: long enough for navigation a script starts a
+ * moment later, short enough not to stand in the reader's own way for long.
+ */
+const LEAVE_GUARD_MS = 2000;
 
 /** What the Panel says a Page Action was aimed at when the Assistant named nothing. */
 const NOTHING_NAMED = '(nothing named)';
@@ -705,18 +712,36 @@ function sameOriginFrame(frame: HTMLIFrameElement): boolean {
  * Runs a Page Action with the page kept in place: a link click or form
  * submission the page's own scripts did not handle is cancelled, and anything
  * that still tries to unload the page (a script we couldn't predict) makes
- * the browser ask "Leave site?". Resolves with what was stopped, if anything.
+ * the browser ask "Leave site?", during the action and for LEAVE_GUARD_MS
+ * after it. Resolves with what was stopped, if anything.
  */
 async function whileActing(doc: Document, act: () => void): Promise<string | undefined> {
   const view = doc.defaultView!;
   let stopped: string | undefined;
-  // Bubble phase on the window: after the page's own handlers, such as a router's.
-  const onClick = (event: Event) => {
-    if (event.defaultPrevented || !(event.target instanceof view.Element)) return;
-    const activated = activatedBy(event.target);
-    if (!activated?.matches('a[href], area[href]') || staysInDocument(activated as HTMLAnchorElement)) return;
-    event.preventDefault();
-    stopped = 'it would have loaded another page, so browser-click stopped it. The page did not change. Tell the reader where the link goes instead.';
+  // A link click is judged after the page's own handlers (a single-page app's
+  // router cancels the load and routes itself), but a handler that stops the
+  // click from propagating must not keep it from being judged. So the window
+  // listens in the capture phase, before anyone can stop it, and hangs a last
+  // listener on every node the click will bubble through: the click is judged
+  // at the node where it stopped, or at the window.
+  const unjudged: (() => void)[] = [];
+  const onClickCapture = (event: Event) => {
+    if (!(event.target instanceof view.Element)) return;
+    const link = activatedBy(event.target);
+    if (!link?.matches('a[href], area[href]') || staysInDocument(link as HTMLAnchorElement)) return;
+    const path = event.composedPath();
+    const judge = (at: Event) => {
+      if (at.currentTarget !== view && !at.cancelBubble) return;
+      for (const node of path) node.removeEventListener('click', judge);
+      if (at.defaultPrevented) return;
+      at.preventDefault();
+      stopped =
+        'it would have loaded another page, so browser-click stopped it. The page did not change. Tell the reader where the link goes instead.';
+    };
+    // Listeners added before the click reaches a node still run there, after the page's own.
+    for (const node of path) node.addEventListener('click', judge);
+    // Stopped in the capture phase, the click reaches none of them; the "Leave site?" guard is left.
+    unjudged.push(() => path.forEach((node) => node.removeEventListener('click', judge)));
   };
   // Capture phase on the window, before the page's handlers: many pages send a
   // form from their own submit handler, so they must not see the event at all.
@@ -730,16 +755,19 @@ async function whileActing(doc: Document, act: () => void): Promise<string | und
     // Older browsers ask only when returnValue is set.
     event.returnValue = '';
   };
-  view.addEventListener('click', onClick);
+  view.addEventListener('click', onClickCapture, true);
   view.addEventListener('submit', onSubmit, true);
   view.addEventListener('beforeunload', onBeforeUnload);
   try {
     act();
     await new Promise((resolve) => setTimeout(resolve, ACTION_SETTLE_MS));
   } finally {
-    view.removeEventListener('click', onClick);
+    view.removeEventListener('click', onClickCapture, true);
+    for (const remove of unjudged) remove();
     view.removeEventListener('submit', onSubmit, true);
-    view.removeEventListener('beforeunload', onBeforeUnload);
+    // A script may navigate a little later (a timer, `form.submit()`, which
+    // fires no submit event): the browser keeps asking for a while yet.
+    setTimeout(() => view.removeEventListener('beforeunload', onBeforeUnload), LEAVE_GUARD_MS);
   }
   return stopped;
 }
@@ -781,8 +809,9 @@ function neverClicked(element: Element): string | undefined {
 /**
  * Why following this link would leave the page, or undefined if it may stay
  * on it. In-page (#fragment) links stay. Other links to this site are allowed
- * through, since a single-page app's router may handle them without loading a
- * document; the click is then guarded by `guardNavigation`.
+ * through to Allow, since a single-page app's router may handle them without
+ * loading a document; `whileActing` then cancels the click if nothing on the
+ * page handled it, so the page never loads another document.
  */
 function leavesPage(link: HTMLAnchorElement | HTMLAreaElement): string | undefined {
   const doc = link.ownerDocument;

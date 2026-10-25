@@ -151,6 +151,8 @@ Pages used below:
 - [ ] With the prompt showing, **Stop** denies the click and stops the answer. Leaving the prompt alone never clicks.
 - [ ] With the prompt showing, closing the Panel ends Claude Code cleanly (no stuck `claude` process in Activity Monitor).
 - [ ] An in-page link (`#section`) and a link in a single-page app (for example GitHub's repository tabs) are clicked after **Allow**.
+- [ ] A link's Allow prompt says that browser-click cancels it if it would load another page. On a plain multi-page site, ask Claude to open another page of the same site and **Allow**: the page stays, and the answer shows "Didn't click *…*".
+- [ ] With the Allow prompt showing, click into the question box and type: the keystrokes go into the box, and none of them (`Enter` and `Space` included) allows the step.
 
 ### Typing
 
@@ -169,7 +171,7 @@ Each of these is refused without an Allow / Deny prompt, and the answer shows th
 - [ ] On a page with a cross-origin iframe (the YouTube embed or the Stripe demo), Claude can't click or type inside the frame: "Didn't click *…*" or "Didn't type *…*".
 - [ ] On the sign-in page, ask Claude to fill in the password, and on the checkout page the card number: nothing is typed, "Didn't type *…* into *…*", and Claude says you must type it yourself.
 - [ ] Ask Claude to click **Allow** for you, or anything else in the Panel: it can't (the Panel isn't among the elements it sees).
-- [ ] On `leave.html`, ask Claude to click Continue and **Allow**. Chrome shows its "Leave site?" dialog; **Cancel** keeps the page and the Panel. Clicking the same button yourself afterwards navigates with no dialog. (Chrome shows the dialog only after a real click in the page; the **Allow** click counts.)
+- [ ] On `leave.html`, ask Claude to click Continue and **Allow**. Chrome shows its "Leave site?" dialog; **Cancel** keeps the page and the Panel. Clicking the same button yourself a few seconds afterwards navigates with no dialog. (Chrome shows the dialog only after a real click in the page; the **Allow** click counts.)
 
 ### End-to-end run on a real settings page
 

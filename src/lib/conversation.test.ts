@@ -1690,6 +1690,7 @@ describe('Conversation: clicks that are never allowed', () => {
     <a id="other-page" href="/billing" data-rect="10,100,120,20">Billing page</a>
     <a id="in-page" href="#faq" data-rect="10,130,120,20">Jump to FAQ</a>
     <a id="routed" href="/app/profile" data-rect="10,160,120,20"><span id="routed-text">Profile</span></a>
+    <a id="tracked" href="/account" data-rect="10,190,120,20">Account</a>
     <h2 id="faq" data-rect="10,400,120,20">FAQ</h2>`;
 
   function setupLinks() {
@@ -1704,13 +1705,20 @@ describe('Conversation: clicks that are never allowed', () => {
         view.history.pushState(null, '', link.href);
       }
     });
+    // A click tracker that stops the click from going any further, but not from loading the page.
+    doc.getElementById('tracked')!.addEventListener('click', (event) => event.stopPropagation());
     // What the browser would do by default with each link click nobody prevented.
+    // Capture phase, so it sees every click, propagation stopped or not.
     const loads: string[] = [];
-    view.addEventListener('click', (event) => {
-      const link = (event.target as Element).closest('a');
-      // The default action runs once every listener has had the event.
-      if (link) queueMicrotask(() => !event.defaultPrevented && !link.getAttribute('href')!.startsWith('#') && loads.push(link.id));
-    });
+    view.addEventListener(
+      'click',
+      (event) => {
+        const link = (event.target as Element).closest('a');
+        // The default action runs once every listener has had the event.
+        if (link) queueMicrotask(() => !event.defaultPrevented && !link.getAttribute('href')!.startsWith('#') && loads.push(link.id));
+      },
+      true,
+    );
     return { ...harness, loads };
   }
 
@@ -1757,6 +1765,17 @@ describe('Conversation: clicks that are never allowed', () => {
     expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Billing page', outcome: 'refused' });
   });
 
+  it('stops a same-site link load even when the page stops the click from propagating', async () => {
+    const { model, events, requests, loads, conversation } = setupLinks();
+    const click = lookThenClick(model, 'Account');
+    await conversation.ask('Open my account.');
+
+    expect(requests).toHaveLength(1);
+    expect(loads).toEqual([]);
+    expect(resultText(await click.call!.result)).toMatch(/another page/i);
+    expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Account', outcome: 'refused' });
+  });
+
   /** Buttons whose scripts do what their markup doesn't say. */
   const SCRIPTED = `
     <form id="newsletter"><input name="email" data-rect="10,10,120,20"></form>
@@ -1777,9 +1796,25 @@ describe('Conversation: clicks that are never allowed', () => {
     await conversation.ask('Go on.');
 
     expect(askedDuringClick).toBe(true);
-    expect(unloadAsks(doc)).toBe(false);
     expect((await click.call!.result).isError).toBeFalsy();
     expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Continue', outcome: 'done' });
+  });
+
+  it('keeps asking before leaving for a while after the click, for navigation a script delays, then stops asking', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { doc, model, conversation } = setupRefusing(SCRIPTED);
+      lookThenClick(model, 'Continue');
+      await conversation.ask('Go on.');
+
+      // Stands in for `setTimeout(() => location.href = ..., 500)` or `form.submit()` from a timer.
+      vi.advanceTimersByTime(500);
+      expect(unloadAsks(doc)).toBe(true);
+      vi.advanceTimersByTime(5000);
+      expect(unloadAsks(doc)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stops a form a click submits by script', async () => {

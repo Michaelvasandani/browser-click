@@ -226,16 +226,19 @@ function approvalWords(request: ApprovalRequest) {
   }
 }
 
+/**
+ * The Allow / Deny prompt. It never takes keyboard focus: the reader may be
+ * typing a question, and a keystroke meant for it must never allow a step.
+ */
 function Approval({ request, onAllow, onDeny }: { request: ApprovalRequest; onAllow: () => void; onDeny: () => void }) {
-  const allowRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    allowRef.current?.focus({ preventScroll: true });
-  }, [request]);
   return (
     <div className="approval" role="group" aria-label="Allow this step?">
       <p>{approvalWords(request)}</p>
+      {request.action === 'click' && request.role === 'link' && (
+        <p className="approval-note">If the page doesn't handle this link itself and it would load another page, browser-click cancels it.</p>
+      )}
       <div className="approval-actions">
-        <button type="button" className="primary" ref={allowRef} onClick={onAllow}>
+        <button type="button" className="primary" onClick={onAllow}>
           Allow
         </button>
         <button type="button" className="secondary" onClick={onDeny}>

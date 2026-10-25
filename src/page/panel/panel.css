@@ -253,6 +253,11 @@
   margin: 0 0 8px;
 }
 
+.approval .approval-note {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
 .approval em {
   font-style: normal;
   font-weight: 600;

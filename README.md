@@ -87,11 +87,11 @@ Some things are never allowed, whatever the page says and whether or not you wou
 
 - type into password fields or payment fields (card number, expiry date, security code and similar)
 - click anything that submits a form
-- click a link that leads to another page or opens a new tab (links within the page, and in-app navigation on sites like GitHub, are fine)
+- click a link that leads to another site, opens a new tab or downloads a file. A link to another page of the same site waits for **Allow** like any click, because single-page apps (GitHub, say) handle those links themselves without loading a page; if the page doesn't handle it and it would load another page, browser-click cancels it, and the prompt says so. Links within the page are fine.
 - reach inside content embedded from other sites, such as videos, payment forms and widgets (it can still put a Mark around one as a whole)
 - touch the Panel, so it can never click its own **Allow**
 
-These refusals go back to Claude with the reason, and Claude doesn't ask you first. While a click or typing is running, the page also asks Chrome to confirm before it unloads, so a click that navigates by script brings up Chrome's "Leave site?" dialog and you can cancel it.
+These refusals go back to Claude with the reason, and Claude doesn't ask you first. While a click or typing is running, and for two seconds after it, the page also asks Chrome to confirm before it unloads, so a click that navigates by script (even a moment later) brings up Chrome's "Leave site?" dialog and you can cancel it.
 
 Every Mark and Page Action shows as one line in the answer: "Marked *Save*", "Scrolled to *Billing*", "Clicked *Settings*", "Typed *refunds* into *Search*", and for steps that didn't happen "Didn't click *Delete*". The Panel always shows what was done to the page.
 
