@@ -233,7 +233,7 @@ function serve(port: Browser.runtime.Port) {
       const why = browser.runtime.lastError?.message ?? 'Claude Code stopped unexpectedly.';
       turns.exit(why).forEach(post);
     });
-    const pageTools = offeredPageTools({ drawOnPage: open.drawOnPage });
+    const pageTools = offeredPageTools({ drawOnPage: open.drawOnPage, actOnPage: open.actOnPage });
     native.postMessage({
       type: 'open',
       model: open.model,

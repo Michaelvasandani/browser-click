@@ -120,7 +120,11 @@ export function startPage() {
       if (settings.backend === 'claude-code') {
         client = claudeCode = openClaudeCodeClient(settings, pageContext.title);
         // Only Claude Code is given page tools for now; the API key backend gets none.
-        pageTools = createPageTools(document, { drawOnPage: settings.drawOnPage }, { capture: captureForLook });
+        pageTools = createPageTools(
+          document,
+          { drawOnPage: settings.drawOnPage, actOnPage: settings.actOnPage },
+          { capture: captureForLook },
+        );
       }
       panel = new PanelHost(image, pageContext, settings, client, pageTools ?? undefined, {
         onClose: closePanel,

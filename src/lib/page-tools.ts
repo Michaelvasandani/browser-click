@@ -11,7 +11,7 @@ import { MARK_KINDS, MarksLayer, type MarkAnchor, type MarkKind, type ViewportRe
  * left to the model.
  */
 
-export type PageToolName = 'look' | 'mark';
+export type PageToolName = 'look' | 'mark' | 'scroll_to';
 
 export interface PageToolDefinition {
   name: PageToolName;
@@ -31,6 +31,15 @@ export interface PageToolResult {
   content: ({ type: 'text'; text: string } | PageToolImage)[];
   isError?: boolean;
 }
+
+/** The kinds of Page Action. */
+export type PageActionKind = 'scroll';
+
+/**
+ * How a Page Action ended: carried out, or refused by the page tools' rules.
+ * (Clicks and typing will add 'denied', for a step the user did not allow.)
+ */
+export type PageActionOutcome = 'done' | 'refused';
 
 /** An image in a page tool result, in MCP's shape. Only look returns one. */
 export interface PageToolImage {
@@ -53,7 +62,10 @@ export type CaptureVisiblePage = () => Promise<CaptureResponse>;
 export const MAX_IMAGE_DATA_CHARS = 700_000;
 
 /** Something a page tool call did that the Panel shows as a line in the answer. */
-export type PageToolEffect = MarkEffect;
+export type PageToolEffect =
+  | MarkEffect
+  /** `target` names the element as the reader would: its name, or what the Assistant asked for when refused. */
+  | { type: 'page-action'; action: PageActionKind; target: string; outcome: PageActionOutcome };
 
 /**
  * A Mark was drawn. `target` names the element it points at (absent for an
@@ -73,9 +85,17 @@ export interface PageToolOutcome {
   effect?: PageToolEffect;
 }
 
+/** What the Conversation tells the page tools about a call: what the Assistant knows of the page. */
+export interface PageToolCallContext {
+  /** The Page Context the Assistant has been sent so far (titles and page text). */
+  pageText?: string;
+}
+
 /** The settings that decide which page tools are offered. */
 export interface PageToolSettings {
   drawOnPage: boolean;
+  /** Page Actions. Off unless set. */
+  actOnPage?: boolean;
 }
 
 const LOOK: PageToolDefinition = {
@@ -114,16 +134,34 @@ const MARK: PageToolDefinition = {
   },
 };
 
+const SCROLL_TO: PageToolDefinition = {
+  name: 'scroll_to',
+  description:
+    'Scroll the page to bring an element into view. Takes either the name of a heading, link, button, field or label exactly as it appears in the Page Context, or an element reference from the latest look. Only goes to things already named in the Page Context, so it cannot be used to search the page. Returns the elements in view afterwards.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'The element\'s name, exactly as it appears in the Page Context, such as "Billing".' },
+      element: { type: 'string', description: 'Or an element reference from look, such as e3.' },
+    },
+    additionalProperties: false,
+  },
+};
+
 /** The page tools the Assistant is given under these settings. */
 export function offeredPageTools(settings: PageToolSettings): PageToolDefinition[] {
-  return settings.drawOnPage ? [LOOK, MARK] : [];
+  const tools: PageToolDefinition[] = [];
+  if (settings.drawOnPage || settings.actOnPage) tools.push(LOOK);
+  if (settings.drawOnPage) tools.push(MARK);
+  if (settings.actOnPage) tools.push(SCROLL_TO);
+  return tools;
 }
 
 export interface PageTools {
   /** The tools offered under the current settings. A call to any other is refused. */
   readonly offered: readonly PageToolDefinition[];
   /** Runs one call. Never throws: failures and refusals come back as error results. */
-  run(call: PageToolCall): Promise<PageToolOutcome>;
+  run(call: PageToolCall, context?: PageToolCallContext): Promise<PageToolOutcome>;
   /** Remove the current answer's Marks. Returns true if there were any. */
   clearMarks(): boolean;
   /** Hide the Marks (during Selection Mode, so they stay out of a new Selection), or bring them back. */
@@ -176,6 +214,23 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
   // Marks are hidden during Selection Mode.
   let hiddenForSelection = false;
 
+  /**
+   * Every Page Action, carried out or refused, returns a short result plus a
+   * fresh visible-element list, so the Assistant sees what changed.
+   */
+  const pageAction = (
+    action: PageActionKind,
+    target: string,
+    outcome: PageActionOutcome,
+    summary: string,
+  ): PageToolOutcome => {
+    const text = `${summary}\n\n${describeVisible(doc, refs)}`;
+    return {
+      result: outcome === 'done' ? ok(text) : refused(text),
+      effect: { type: 'page-action', action, target, outcome },
+    };
+  };
+
   /** An image of the visible page, without browser-click's Marks, or why there is none. */
   async function captureImage(): Promise<PageToolImage | string> {
     if (!options.capture) return 'Images of the page are not available here.';
@@ -198,7 +253,10 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
     return { type: 'image', data: data!, mimeType: mimeType! };
   }
 
-  const tools: Record<PageToolName, (input: Record<string, unknown>) => PageToolOutcome | Promise<PageToolOutcome>> = {
+  const tools: Record<
+    PageToolName,
+    (input: Record<string, unknown>, context: PageToolCallContext) => PageToolOutcome | Promise<PageToolOutcome>
+  > = {
     look: async (input) => {
       if (input.image !== true) return { result: ok(describeVisible(doc, refs)) };
       const image = await captureImage();
@@ -233,16 +291,24 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
       const what = kind === 'label' ? `label ${number}` : String(kind);
       return { result: ok(`Drew a ${what} at ${where.described}.`), effect };
     },
+    scroll_to: (input, context) => {
+      const found = scrollTarget(doc, refs, input, context.pageText ?? '');
+      if ('refusal' in found) return pageAction('scroll', found.asked, 'refused', found.refusal);
+      const { element } = found;
+      element.scrollIntoView({ block: 'center', inline: 'nearest' });
+      const target = nameOf(element) || roleOf(element);
+      return pageAction('scroll', target, 'done', `Scrolled to ${refs.ref(element)} (${describeElement(element)}).`);
+    },
   };
 
   return {
     offered,
-    async run(call) {
+    async run(call, context = {}) {
       const tool = offered.find((t) => t.name === call.name);
       if (!tool) return { result: refused(`The ${JSON.stringify(call.name)} tool is not available.`) };
       try {
         const input = call.input && typeof call.input === 'object' ? (call.input as Record<string, unknown>) : {};
-        return await tools[tool.name](input);
+        return await tools[tool.name](input, context);
       } catch (error) {
         return { result: refused(`The ${tool.name} tool failed: ${error instanceof Error ? error.message : String(error)}`) };
       }
@@ -296,6 +362,48 @@ function describeVisible(doc: Document, refs: Refs): string {
   }
   if (lines.length === 2) lines.push('(none)');
   return lines.join('\n');
+}
+
+/** Elements scroll_to may go to by name: the listed ones, plus labels that name a part of the page. */
+const SCROLL_TARGET_SELECTOR = `${LISTED_SELECTOR}, label, legend`;
+
+const comparable = (text: string) => text.replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * The element a scroll_to call asks for, or why it is refused. It goes only to
+ * an element the Assistant already knows: one from look, or one whose whole
+ * name appears in the Page Context it was sent. So it cannot search the page.
+ */
+function scrollTarget(
+  doc: Document,
+  refs: Refs,
+  input: Record<string, unknown>,
+  pageText: string,
+): { element: Element } | { refusal: string; asked: string } {
+  if (input.element !== undefined) {
+    const asked = String(input.element);
+    const element = refs.element(input.element);
+    if (!element || !isListed(element)) return { asked, refusal: unknownElement(input.element) };
+    return { element };
+  }
+  if (typeof input.name !== 'string' || !comparable(input.name)) {
+    return { asked: 'nothing', refusal: 'Give scroll_to the name of an element from the Page Context, or a reference from look.' };
+  }
+  const asked = input.name.replace(/\s+/g, ' ').trim();
+  const name = comparable(asked);
+  if (!comparable(pageText).includes(name)) {
+    return {
+      asked,
+      refusal: `${JSON.stringify(asked)} is not in the Page Context. scroll_to only goes to things the Page Context names; it cannot search the page.`,
+    };
+  }
+  for (const element of doc.querySelectorAll(SCROLL_TARGET_SELECTOR)) {
+    if (isListed(element) && comparable(nameOf(element)) === name) return { element };
+  }
+  return {
+    asked,
+    refusal: `No element on the page is named exactly ${JSON.stringify(asked)}. Use the name of a heading, link, button, field or label exactly as the Page Context gives it.`,
+  };
 }
 
 function describeElement(element: Element): string {

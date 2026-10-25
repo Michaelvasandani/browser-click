@@ -11,6 +11,7 @@ import {
 import { browser } from 'wxt/browser';
 import type { PageToBackgroundMessage } from '@/lib/messages';
 import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
+import type { PageActionKind, PageActionOutcome } from '@/lib/page-tools';
 import type { PageStep, PanelStore, SelectionView, TurnView } from '../store';
 import { Answer } from './Answer';
 
@@ -157,7 +158,7 @@ function openOptions() {
 }
 
 /** One line for a Mark: "Marked *Save*", "Pointed at an area of the page", "Labelled *Save* 2". */
-function MarkStep({ step }: { step: PageStep }) {
+function MarkStep({ step }: { step: Extract<PageStep, { kind: 'mark' }> }) {
   const target = step.target ? <em>{step.target}</em> : 'an area of the page';
   switch (step.mark) {
     case 'arrow':
@@ -175,6 +176,11 @@ function MarkStep({ step }: { step: PageStep }) {
   }
 }
 
+/** How each Page Action reads in its line, by outcome: "Scrolled to Billing", "Didn't scroll to Billing". */
+const PAGE_ACTION_WORDS: Record<PageActionKind, Record<PageActionOutcome, string>> = {
+  scroll: { done: 'Scrolled to', refused: "Didn't scroll to" },
+};
+
 // Memoised: while an answer streams, only the turn that changed re-renders.
 const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
   const sources = webSources(turn);
@@ -184,8 +190,14 @@ const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: (
       <p className="user-question">{turn.question}</p>
       {turn.answer && <Answer text={turn.answer} />}
       {turn.steps.map((step, index) => (
-        <p key={index} className="status page-step">
-          <MarkStep step={step} />
+        <p key={index} className="status page-step" data-outcome={step.kind === 'page-action' ? step.outcome : undefined}>
+          {step.kind === 'mark' ? (
+            <MarkStep step={step} />
+          ) : (
+            <>
+              {PAGE_ACTION_WORDS[step.action][step.outcome]} <em>{step.target}</em>
+            </>
+          )}
         </p>
       ))}
       {(turn.searching || turn.status === 'waiting') && (

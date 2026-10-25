@@ -54,6 +54,7 @@ async function onActionClicked(tab: Browser.tabs.Tab) {
       model: settings.model,
       webSearch: settings.webSearch,
       drawOnPage: settings.drawOnPage,
+      actOnPage: settings.actOnPage,
     },
   };
   try {

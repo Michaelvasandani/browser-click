@@ -21,9 +21,21 @@ export function pageDocument(body: string, url = 'https://example.com/settings')
     `<!doctype html><html><head><title>Settings</title></head><body>${body}</body></html>`,
     { url },
   );
+  // How far the page is scrolled down. `data-rect` gives where an element sits
+  // before any scrolling; scrollIntoView brings the element's top to the top
+  // of the viewport, and reports the scroll as the window would (scrollY and
+  // a scroll event), so Marks follow it. `scrollWindow` alone does not move
+  // elements: tests using it change `data-rect` themselves.
+  let offset = 0;
+  const boxOf = (element: Element) =>
+    element.hasAttribute('data-rect') ? parseBox(element.getAttribute('data-rect')!) : DEFAULT_RECT;
   window.Element.prototype.getBoundingClientRect = function (this: Element) {
-    const box = this.hasAttribute('data-rect') ? parseBox(this.getAttribute('data-rect')!) : DEFAULT_RECT;
-    return new window.DOMRect(box.left, box.top, box.width, box.height);
+    const box = boxOf(this);
+    return new window.DOMRect(box.left, box.top - offset, box.width, box.height);
+  };
+  window.Element.prototype.scrollIntoView = function (this: Element) {
+    offset = boxOf(this).top;
+    scrollWindow(window.document, window.scrollX, offset);
   };
   return window.document;
 }
