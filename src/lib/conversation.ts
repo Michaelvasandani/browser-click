@@ -91,8 +91,6 @@ export type ConversationEvent =
    * where its target is in the viewport (so the Panel can move out of the way).
    */
   | MarkEffect
-  /** The previous answer's Marks were removed from the page. */
-  | { type: 'marks-cleared' }
   /** The Assistant took a Page Action, or the page tools refused it. `target` is what it was aimed at. */
   | { type: 'page-action'; action: PageActionKind; target: string; text?: string; outcome: PageActionOutcome }
   /** The answer is complete. */
@@ -289,8 +287,8 @@ export class Conversation {
       this.sentPages = sentPages;
     };
     this.emit({ type: 'turn-started', question, selectionIds: selections.map((s) => s.id) });
-    // Marks belong to the answer that drew them.
-    if (this.options.pageTools?.clearMarks()) this.emit({ type: 'marks-cleared' });
+    // Marks belong to the answer that drew them. The earlier answer's step lines stay in the Panel.
+    this.options.pageTools?.clearMarks();
 
     const controller = new AbortController();
     this.controller = controller;

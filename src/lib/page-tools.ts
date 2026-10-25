@@ -205,7 +205,10 @@ const TYPE: PageToolDefinition = {
 };
 
 /** How long a click or typing is given to change the page before the elements in view are listed. */
-const CLICK_SETTLE_MS = 150;
+const ACTION_SETTLE_MS = 150;
+
+/** What the Panel says a Page Action was aimed at when the Assistant named nothing. */
+const NOTHING_NAMED = '(nothing named)';
 
 /** The page tools the Assistant is given under these settings. */
 export function offeredPageTools(settings: PageToolSettings): PageToolDefinition[] {
@@ -279,15 +282,57 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
    */
   const pageAction = (
     action: PageActionKind,
-    target: string,
+    target: string | undefined,
     outcome: PageActionOutcome,
     summary: string,
     typed?: string,
   ): PageToolOutcome => {
     const text = `${summary}\n\n${describeVisible(doc, refs)}`;
-    const effect: Extract<PageToolEffect, { type: 'page-action' }> = { type: 'page-action', action, target, outcome };
+    const effect: Extract<PageToolEffect, { type: 'page-action' }> = {
+      type: 'page-action',
+      action,
+      target: target ?? NOTHING_NAMED,
+      outcome,
+    };
     if (typed !== undefined) effect.text = typed;
     return { result: outcome === 'done' ? ok(text) : refused(text), effect };
+  };
+
+  /**
+   * A Page Action that waits for the user (click, type), once its own rules
+   * have let it through: ask, check the rules again (the page may have
+   * changed while the user decided), act with the page kept in place, report.
+   */
+  const approvedAction = async (
+    context: PageToolCallContext,
+    step: {
+      action: 'click' | 'type';
+      element: Element;
+      /** What typing puts in the field. */
+      text?: string;
+      request: ApprovalRequest;
+      recheck: () => Resolved<object>;
+      act: () => void;
+      /** What did not happen on Deny, and what did happen, given `e3 (button "Save")`. */
+      notDone: (described: string) => string;
+      did: (described: string) => string;
+      /** Anything worth adding once done. */
+      after?: () => string;
+    },
+  ): Promise<PageToolOutcome> => {
+    const { action, element, text } = step;
+    const target = labelOf(element);
+    const described = refAndRole(refs, element);
+    const allowed = (await context.approve?.(step.request)) ?? false;
+    if (!allowed) {
+      return pageAction(action, target, 'denied', `The user didn't allow this: ${step.notDone(described)}. Carry on without it.`, text);
+    }
+    if (!element.isConnected) return pageAction(action, target, 'refused', `${described} is no longer on the page.`, text);
+    const still = step.recheck();
+    if ('refusal' in still) return pageAction(action, target, 'refused', `It changed while the user decided: ${still.refusal}`, text);
+    const stopped = await whileActing(doc, step.act);
+    if (stopped) return pageAction(action, target, 'refused', `${step.did(described)}, but ${stopped}`, text);
+    return pageAction(action, target, 'done', `${step.did(described)}.${step.after?.() ?? ''}`, text);
   };
 
   /** An image of the visible page, without browser-click's Marks, or why there is none. */
@@ -338,7 +383,7 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
           return { result: refused('A label number must be a whole number from 1 to 99.') };
         }
       }
-      const where = markTarget(input, refs, viewportOf(doc));
+      const where = markTarget(doc, input, refs);
       if ('refusal' in where) return { result: refused(where.refusal) };
       marks ??= new MarksLayer(doc);
       if (hiddenForSelection) marks.setHidden(true);
@@ -355,53 +400,38 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
       if ('refusal' in found) return pageAction('scroll', found.asked, 'refused', found.refusal);
       const { element } = found;
       element.scrollIntoView({ block: 'center', inline: 'nearest' });
-      const target = nameOf(element) || roleOf(element);
-      return pageAction('scroll', target, 'done', `Scrolled to ${refs.ref(element)} (${describeElement(element)}).`);
+      return pageAction('scroll', labelOf(element), 'done', `Scrolled to ${refAndRole(refs, element)}.`);
     },
-    click: async (input, context) => {
+    click: (input, context) => {
       const found = clickTarget(doc, refs, input);
       if ('refusal' in found) return pageAction('click', found.asked, 'refused', found.refusal);
       const { element } = found;
-      const target = nameOf(element) || roleOf(element);
-      const described = `${refs.ref(element)} (${describeElement(element)})`;
-      const allowed = (await context.approve?.({ action: 'click', target, role: roleOf(element) })) ?? false;
-      if (!allowed) {
-        return pageAction('click', target, 'denied', `The user didn't allow this: ${described} was not clicked. Carry on without it.`);
-      }
-      // The page may have changed while the user decided.
-      if (!element.isConnected) return pageAction('click', target, 'refused', `${described} is no longer on the page.`);
-      const still = clickTarget(doc, refs, { element: refs.ref(element) });
-      if ('refusal' in still) return pageAction('click', target, 'refused', `It changed while the user decided: ${still.refusal}`);
-      const stopped = await whileActing(doc, async () => {
-        (element as HTMLElement).click();
-        await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+      return approvedAction(context, {
+        action: 'click',
+        element,
+        request: { action: 'click', target: labelOf(element), role: roleOf(element) },
+        recheck: () => clickTarget(doc, refs, { element: refs.ref(element) }),
+        act: () => (element as HTMLElement).click(),
+        notDone: (described) => `${described} was not clicked`,
+        did: (described) => `Clicked ${described}`,
       });
-      if (stopped) return pageAction('click', target, 'refused', `Clicked ${described}, but ${stopped}`);
-      return pageAction('click', target, 'done', `Clicked ${described}.`);
     },
-    type: async (input, context) => {
+    type: (input, context) => {
       const typed = typeof input.text === 'string' ? input.text : undefined;
       const found = typeTarget(doc, refs, input);
       if ('refusal' in found) return pageAction('type', found.asked, 'refused', found.refusal, typed);
       const { field, text } = found;
-      const target = nameOf(field) || roleOf(field);
-      const described = `${refs.ref(field)} (${describeElement(field)})`;
-      const quoted = JSON.stringify(text);
-      const allowed = (await context.approve?.({ action: 'type', target, role: roleOf(field), text })) ?? false;
-      if (!allowed) {
-        return pageAction('type', target, 'denied', `The user didn't allow this: nothing was typed into ${described}. Carry on without it.`, text);
-      }
-      // The page may have changed while the user decided.
-      if (!field.isConnected) return pageAction('type', target, 'refused', `${described} is no longer on the page.`, text);
-      const still = typeTarget(doc, refs, { element: refs.ref(field), text });
-      if ('refusal' in still) return pageAction('type', target, 'refused', `It changed while the user decided: ${still.refusal}`, text);
-      const stopped = await whileActing(doc, async () => {
-        typeInto(field, text);
-        await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+      return approvedAction(context, {
+        action: 'type',
+        element: field,
+        text,
+        request: { action: 'type', target: labelOf(field), role: roleOf(field), text },
+        recheck: () => typeTarget(doc, refs, { element: refs.ref(field), text }),
+        act: () => typeInto(field, text),
+        notDone: (described) => `nothing was typed into ${described}`,
+        did: (described) => `Typed ${JSON.stringify(text)} into ${described}`,
+        after: () => (field.value === text ? '' : ` The page changed it: the field now holds ${JSON.stringify(field.value)}.`),
       });
-      if (stopped) return pageAction('type', target, 'refused', `Typed ${quoted} into ${described}, but ${stopped}`, text);
-      const shown = field.value === text ? '' : ` The page changed it: the field now holds ${JSON.stringify(field.value)}.`;
-      return pageAction('type', target, 'done', `Typed ${quoted} into ${described}.${shown}`, text);
     },
   };
 
@@ -457,8 +487,7 @@ class Refs {
 }
 
 function describeVisible(doc: Document, refs: Refs): string {
-  const view = doc.defaultView!;
-  const viewport = { width: view.innerWidth, height: view.innerHeight };
+  const viewport = viewportOf(doc);
   const lines = [`Viewport: ${viewport.width}x${viewport.height}`, 'Visible elements (reference, role, name):'];
   for (const element of doc.querySelectorAll(LISTED_SELECTOR)) {
     if (!isListed(element) || !inView(element, viewport)) continue;
@@ -483,7 +512,7 @@ function scrollTarget(
   refs: Refs,
   input: Record<string, unknown>,
   pageText: string,
-): { element: Element } | { refusal: string; asked: string } {
+): Resolved<{ element: Element }> {
   if (input.element !== undefined) {
     const asked = String(input.element);
     const element = refs.element(input.element);
@@ -491,7 +520,7 @@ function scrollTarget(
     return { element };
   }
   if (typeof input.name !== 'string' || !comparable(input.name)) {
-    return { asked: 'nothing', refusal: 'Give scroll_to the name of an element from the Page Context, or a reference from look.' };
+    return { refusal: 'Give scroll_to the name of an element from the Page Context, or a reference from look.' };
   }
   const asked = input.name.replace(/\s+/g, ' ').trim();
   const name = comparable(asked);
@@ -514,21 +543,41 @@ function scrollTarget(
  * The element a click call asks for, or why it is refused: one the Assistant
  * looked up, still listed and in view. The rules run before the user is asked.
  */
-function clickTarget(doc: Document, refs: Refs, input: Record<string, unknown>): { element: Element } | { refusal: string; asked: string } {
-  const asked = typeof input.element === 'string' ? input.element : 'nothing';
-  const element = refs.element(input.element);
-  if (!element) return { asked, refusal: unknownElement(input.element) };
-  const outOfReach = offLimits(doc, element);
-  if (outOfReach) return { asked: nameOf(element) || roleOf(element), refusal: `${refs.ref(element)} ${outOfReach}` };
-  if (!isListed(element)) return { asked, refusal: unknownElement(input.element) };
-  const view = doc.defaultView!;
-  if (!inView(element, { width: view.innerWidth, height: view.innerHeight })) {
-    return { asked, refusal: `${refs.ref(element)} (${describeElement(element)}) is not in view. Only what is in view can be clicked.` };
-  }
+function clickTarget(doc: Document, refs: Refs, input: Record<string, unknown>): Resolved<{ element: Element }> {
+  const found = elementInReach(doc, refs, input.element, { notInView: 'Only what is in view can be clicked.' });
+  if ('refusal' in found) return found;
+  const { element } = found;
   const never = neverClicked(element);
-  if (never) {
-    return { asked: nameOf(element) || roleOf(element), refusal: `${refs.ref(element)} (${describeElement(element)}) ${never}` };
-  }
+  if (never) return { asked: labelOf(element), refusal: `${refAndRole(refs, element)} ${never}` };
+  return { element };
+}
+
+/**
+ * What a call asked for, resolved, or why it is refused. `asked` names the
+ * request for the Panel: the element's name once it is known, the reference
+ * as given before that, or undefined when the call named nothing.
+ */
+type Resolved<T> = T | { refusal: string; asked?: string };
+
+/**
+ * The opening checks every tool that points at an element makes: a reference
+ * from look, to an element still on the page, within reach (`reach`, by
+ * default every Page Action's `offLimits`), still listed and in view.
+ */
+function elementInReach(
+  doc: Document,
+  refs: Refs,
+  ref: unknown,
+  { notInView, reach = offLimits }: { notInView: string; reach?: (doc: Document, element: Element) => string | undefined },
+): Resolved<{ element: Element }> {
+  const asked = typeof ref === 'string' ? ref : undefined;
+  const element = refs.element(ref);
+  if (!element) return { asked, refusal: unknownElement(ref) };
+  // Checked before isListed, so the refusal says why instead of "no element".
+  const outOfReach = reach(doc, element);
+  if (outOfReach) return { asked: labelOf(element), refusal: `${refs.ref(element)} ${outOfReach}` };
+  if (!isListed(element)) return { asked, refusal: unknownElement(ref) };
+  if (!inView(element, viewportOf(doc))) return { asked, refusal: `${refAndRole(refs, element)} is not in view. ${notInView}` };
   return { element };
 }
 
@@ -547,19 +596,12 @@ function typeTarget(
   doc: Document,
   refs: Refs,
   input: Record<string, unknown>,
-): { field: TextField; text: string } | { refusal: string; asked: string } {
-  const asked = typeof input.element === 'string' ? input.element : 'nothing';
-  const element = refs.element(input.element);
-  if (!element) return { asked, refusal: unknownElement(input.element) };
-  const name = nameOf(element) || roleOf(element);
-  const described = `${refs.ref(element)} (${describeElement(element)})`;
-  const outOfReach = offLimits(doc, element);
-  if (outOfReach) return { asked: name, refusal: `${refs.ref(element)} ${outOfReach}` };
-  if (!isListed(element)) return { asked, refusal: unknownElement(input.element) };
-  const view = doc.defaultView!;
-  if (!inView(element, { width: view.innerWidth, height: view.innerHeight })) {
-    return { asked, refusal: `${described} is not in view. Only fields in view can be typed into.` };
-  }
+): Resolved<{ field: TextField; text: string }> {
+  const found = elementInReach(doc, refs, input.element, { notInView: 'Only fields in view can be typed into.' });
+  if ('refusal' in found) return found;
+  const { element } = found;
+  const name = labelOf(element);
+  const described = refAndRole(refs, element);
   const never = neverTyped(element);
   if (never) return { asked: name, refusal: `${described} ${never}` };
   const isTextarea = element.tagName === 'TEXTAREA';
@@ -617,16 +659,27 @@ function typeInto(field: TextField, text: string) {
  * included), and frames holding content from another origin.
  */
 function offLimits(doc: Document, element: Element): string | undefined {
-  if (element.ownerDocument !== doc) return 'is in content embedded from another site. browser-click never acts inside it.';
+  const outside = notOfThePage(doc, element);
+  if (outside) return outside;
+  if (isFrame(element) && !sameOriginFrame(element as HTMLIFrameElement)) {
+    return 'is content embedded from another site. browser-click never acts inside it; tell the reader what to do there instead.';
+  }
+  return undefined;
+}
+
+/**
+ * Why this element is not part of the page at all, or undefined if it is:
+ * browser-click's own elements, and anything outside this document. Marks
+ * obey this; a frame from another site may still be marked as a whole.
+ */
+function notOfThePage(doc: Document, element: Element): string | undefined {
+  if (element.ownerDocument !== doc) return 'is in content embedded from another site. browser-click never reaches inside it.';
   for (let node: Element | null = element; node; ) {
     if (node.tagName.startsWith(OWN_ELEMENT_PREFIX)) {
-      return "is part of browser-click's own panel or Marks, not the page. browser-click never acts on its own controls.";
+      return "is part of browser-click's own Panel or Marks, not the page. browser-click never points at or acts on its own controls.";
     }
     // Climb out of shadow roots too: the Panel's controls live in one.
     node = node.parentElement ?? ((node.getRootNode() as ShadowRoot).host || null);
-  }
-  if (isFrame(element) && !sameOriginFrame(element as HTMLIFrameElement)) {
-    return 'is content embedded from another site. browser-click never acts inside it; tell the reader what to do there instead.';
   }
   return undefined;
 }
@@ -654,7 +707,7 @@ function sameOriginFrame(frame: HTMLIFrameElement): boolean {
  * that still tries to unload the page (a script we couldn't predict) makes
  * the browser ask "Leave site?". Resolves with what was stopped, if anything.
  */
-async function whileActing(doc: Document, act: () => Promise<void>): Promise<string | undefined> {
+async function whileActing(doc: Document, act: () => void): Promise<string | undefined> {
   const view = doc.defaultView!;
   let stopped: string | undefined;
   // Bubble phase on the window: after the page's own handlers, such as a router's.
@@ -681,7 +734,8 @@ async function whileActing(doc: Document, act: () => Promise<void>): Promise<str
   view.addEventListener('submit', onSubmit, true);
   view.addEventListener('beforeunload', onBeforeUnload);
   try {
-    await act();
+    act();
+    await new Promise((resolve) => setTimeout(resolve, ACTION_SETTLE_MS));
   } finally {
     view.removeEventListener('click', onClick);
     view.removeEventListener('submit', onSubmit, true);
@@ -844,18 +898,20 @@ type MarkTarget =
   | { refusal: string };
 
 /** What a mark call points at: an element it looked up, or an area of the visible page. */
-function markTarget(input: Record<string, unknown>, refs: Refs, viewport: { width: number; height: number }): MarkTarget {
+function markTarget(doc: Document, input: Record<string, unknown>, refs: Refs): MarkTarget {
   if (input.element !== undefined && input.area !== undefined) {
     return { refusal: 'Give either an element or an area, not both.' };
   }
+  const viewport = viewportOf(doc);
   if (input.area === undefined) {
-    const element = refs.element(input.element);
-    if (!element) return { refusal: unknownElement(input.element) };
+    const found = elementInReach(doc, refs, input.element, { notInView: 'Only what is in view can be marked.', reach: notOfThePage });
+    if ('refusal' in found) return found;
+    const { element } = found;
     return {
       anchor: { element },
       area: plainRect(element.getBoundingClientRect()),
-      target: nameOf(element) || roleOf(element) || 'element',
-      described: `${refs.ref(element)} (${describeElement(element)})`,
+      target: labelOf(element),
+      described: refAndRole(refs, element),
     };
   }
   const area = input.area as Record<string, unknown> | null;
@@ -889,6 +945,12 @@ function viewportOf(doc: Document) {
   const view = doc.defaultView!;
   return { width: view.innerWidth, height: view.innerHeight };
 }
+
+/** An element as the reader would say it: its name, or its role if it has none. */
+const labelOf = (element: Element) => nameOf(element) || roleOf(element);
+
+/** An element as the Assistant's results name it: its reference, role and name, such as `e3 (button "Save")`. */
+const refAndRole = (refs: Refs, element: Element) => `${refs.ref(element)} (${describeElement(element)})`;
 
 const plainRect = (rect: DOMRect): ViewportRect => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
 

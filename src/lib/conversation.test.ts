@@ -747,8 +747,8 @@ describe('Conversation: Marks', () => {
 
     expect(marksWhenSent).toBe(0);
     expect(marksOn(doc)).toEqual([]);
-    const secondTurn = events.slice(events.findLastIndex((e) => e.type === 'turn-started'));
-    expect(secondTurn).toContainEqual({ type: 'marks-cleared' });
+    // The first answer's Mark line stays in its own turn.
+    expect(events.filter((e) => e.type === 'mark')).toHaveLength(1);
   });
 
   it('tells the Assistant it can draw Marks when drawing on the page is on', async () => {
@@ -940,6 +940,39 @@ describe('Conversation: Mark kinds and Marks on a live page', () => {
     expect(await calls[2]!.result).toMatchObject({ isError: true });
     expect(await calls[3]!.result).toMatchObject({ isError: true });
     expect(events.filter((e) => e.type === 'mark')).toHaveLength(1);
+  });
+
+  it('refuses a Mark at an element that has moved out of reach since look: into the Panel, hidden, or out of view', async () => {
+    const { doc, model, events, conversation } = setupOnPage(`
+      <h1 id="title" data-rect="40,20,300,30">Settings</h1>
+      <button id="save" data-rect="400,200,80,30">Save</button>
+      <button id="reset" data-rect="400,240,80,30">Reset</button>`);
+    const look = pageToolCall('look');
+    const calls: ScriptedPageToolCall[] = [];
+    model.respond(async function* () {
+      yield look;
+      const seen = await look.result;
+      const refs = ['Settings', 'Save', 'Reset'].map((name) => refOf(seen, name));
+      doc.body.appendChild(doc.createElement('browser-click-panel')).appendChild(doc.getElementById('save')!);
+      doc.getElementById('reset')!.hidden = true;
+      doc.getElementById('title')!.setAttribute('data-rect', '40,2000,300,30');
+      for (const ref of refs) {
+        const call = pageToolCall('mark', { element: ref });
+        calls.push(call);
+        yield call;
+      }
+      yield* response([text('There.')]);
+    });
+    await conversation.ask('Where?');
+
+    const [title, save, reset] = await Promise.all(calls.map((call) => call.result));
+    expect(title).toMatchObject({ isError: true });
+    expect(resultText(title!)).toMatch(/not in view/);
+    expect(save).toMatchObject({ isError: true });
+    expect(resultText(save!)).toMatch(/browser-click's own/);
+    expect(reset).toMatchObject({ isError: true });
+    expect(marksOn(doc)).toEqual([]);
+    expect(events.some((e) => e.type === 'mark')).toBe(false);
   });
 
   it('lists a frame embedded from another site as one element, so a Mark can point at it as a whole', async () => {

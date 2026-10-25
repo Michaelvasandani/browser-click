@@ -36,7 +36,7 @@ export interface TurnView {
   /** A web search is running. */
   searching: boolean;
   sources: Source[];
-  /** Marks drawn (and, later, Page Actions taken) during this answer, in order. */
+  /** Marks drawn and Page Actions taken or refused during this answer, in order. */
   steps: PageStep[];
   /** Why the turn failed or was declined, in plain words. */
   error?: string;
@@ -224,9 +224,6 @@ export class PanelStore {
         if (turn) this.updateLastTurn({ steps: [...turn.steps, { kind: 'page-action', action, target, text, outcome }] });
         break;
       }
-      case 'marks-cleared':
-        // The earlier answer's lines stay: they record what it showed.
-        break;
       case 'error':
         this.updateLastTurn({
           status: 'error',
