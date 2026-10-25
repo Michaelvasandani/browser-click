@@ -55,3 +55,10 @@ export function marksOn(doc: Document): (Box & { pointerEvents: string })[] {
     pointerEvents: layer.style.pointerEvents,
   }));
 }
+
+/** How many Marks a capture of the page would show: none while the Marks layer is hidden. */
+export function marksShowing(doc: Document): number {
+  const layer = doc.querySelector<HTMLElement>('browser-click-marks');
+  if (!layer?.isConnected || layer.style.visibility === 'hidden' || layer.style.display === 'none') return 0;
+  return marksOn(doc).length;
+}

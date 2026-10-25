@@ -7,7 +7,8 @@ import type {
 } from '@/lib/messages';
 import type { ModelClient } from '@/lib/conversation';
 import { extractPageContext } from '@/lib/page-context';
-import { createPageTools, type PageTools } from '@/lib/page-tools';
+import { createPageTools, MAX_IMAGE_DATA_CHARS, type PageTools } from '@/lib/page-tools';
+import { shrinkStill } from './look-image';
 import { openClaudeCodeClient, type ClaudeCodeClient } from './claude-code-port';
 import { portModelClient } from './model-port';
 import { runSelectionMode } from './overlay';
@@ -33,6 +34,18 @@ export function startPage() {
     const fresh = message.fresh && !(resumeAfterAccessLost && panel);
     void beginSelection(fresh, message.settings);
   });
+
+  /** An image of the visible page for look, taken the way Selection Mode takes its still. */
+  async function captureForLook(): Promise<CaptureResponse> {
+    // Selection Mode hides the Panel and covers the page with its own still.
+    if (selecting) return { ok: false, error: 'The reader is making a Selection (Selection Mode is showing).' };
+    // Let the page tools' hiding of the Marks reach the screen first.
+    await nextFrames(2);
+    if (selecting) return { ok: false, error: 'The reader is making a Selection (Selection Mode is showing).' };
+    const capture = await requestCapture();
+    if (!capture.ok) return capture;
+    return shrinkStill(capture.dataUrl, window.innerWidth, MAX_IMAGE_DATA_CHARS);
+  }
 
   function closePanel() {
     panel?.destroy();
@@ -102,7 +115,11 @@ export function startPage() {
       if (settings.backend === 'claude-code') {
         client = claudeCode = openClaudeCodeClient(settings, pageContext.title);
         // Only Claude Code is given page tools for now; the API key backend gets none.
-        pageTools = createPageTools(document, { drawOnPage: settings.drawOnPage, actOnPage: settings.actOnPage });
+        pageTools = createPageTools(
+          document,
+          { drawOnPage: settings.drawOnPage, actOnPage: settings.actOnPage },
+          { capture: captureForLook },
+        );
       }
       panel = new PanelHost(image, pageContext, settings, client, pageTools ?? undefined, {
         onClose: closePanel,
