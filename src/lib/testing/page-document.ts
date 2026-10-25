@@ -23,16 +23,19 @@ export function pageDocument(body: string, url = 'https://example.com/settings')
   );
   // How far the page is scrolled down. `data-rect` gives where an element sits
   // before any scrolling; scrollIntoView brings the element's top to the top
-  // of the viewport.
-  let scrollY = 0;
+  // of the viewport, and reports the scroll as the window would (scrollY and
+  // a scroll event), so Marks follow it. `scrollWindow` alone does not move
+  // elements: tests using it change `data-rect` themselves.
+  let offset = 0;
   const boxOf = (element: Element) =>
     element.hasAttribute('data-rect') ? parseBox(element.getAttribute('data-rect')!) : DEFAULT_RECT;
   window.Element.prototype.getBoundingClientRect = function (this: Element) {
     const box = boxOf(this);
-    return new window.DOMRect(box.left, box.top - scrollY, box.width, box.height);
+    return new window.DOMRect(box.left, box.top - offset, box.width, box.height);
   };
   window.Element.prototype.scrollIntoView = function (this: Element) {
-    scrollY = boxOf(this).top;
+    offset = boxOf(this).top;
+    scrollWindow(window.document, window.scrollX, offset);
   };
   return window.document;
 }
@@ -42,8 +45,27 @@ function parseBox(value: string): Box {
   return { left, top, width, height };
 }
 
+export interface MarkOnPage extends Box {
+  /** box, arrow, highlight or label. */
+  kind: string;
+  /** The Mark's own text, such as a label's number. */
+  text: string;
+  /** False while the Marks layer, or this Mark, is hidden. */
+  visible: boolean;
+  /** The layer's pointer-events style. */
+  pointerEvents: string;
+}
+
+/** Make the window report this scroll position, as a scroll would (jsdom has no layout). */
+export function scrollWindow(doc: Document, x: number, y: number) {
+  const view = doc.defaultView!;
+  Object.defineProperty(view, 'scrollX', { value: x, configurable: true });
+  Object.defineProperty(view, 'scrollY', { value: y, configurable: true });
+  view.dispatchEvent(new view.Event('scroll'));
+}
+
 /** The Marks drawn on the document, as the boxes they occupy in the viewport. */
-export function marksOn(doc: Document): (Box & { pointerEvents: string })[] {
+export function marksOn(doc: Document): MarkOnPage[] {
   const layer = doc.querySelector<HTMLElement>('browser-click-marks');
   const root = layer?.shadowRoot;
   if (!layer || !root) return [];
@@ -52,6 +74,9 @@ export function marksOn(doc: Document): (Box & { pointerEvents: string })[] {
     top: parseFloat(mark.style.top),
     width: parseFloat(mark.style.width),
     height: parseFloat(mark.style.height),
+    kind: mark.dataset.mark ?? '',
+    text: mark.textContent ?? '',
+    visible: layer.style.display !== 'none' && mark.style.display !== 'none',
     pointerEvents: layer.style.pointerEvents,
   }));
 }

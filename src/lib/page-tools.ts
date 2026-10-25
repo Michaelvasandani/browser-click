@@ -1,5 +1,5 @@
 import type { CaptureResponse } from './messages';
-import { MarksLayer } from './marks';
+import { MARK_KINDS, MarksLayer, type MarkAnchor, type MarkKind, type ViewportRect } from './marks';
 
 /**
  * Page tools: the one definition of the tools the Assistant may call on the
@@ -74,9 +74,22 @@ export const MAX_IMAGE_DATA_CHARS = 700_000;
 
 /** Something a page tool call did that the Panel shows as a line in the answer. */
 export type PageToolEffect =
-  | { type: 'mark'; target: string }
+  | MarkEffect
   /** `target` names the element as the reader would: its name, or what the Assistant asked for when refused. */
   | { type: 'page-action'; action: PageActionKind; target: string; outcome: PageActionOutcome };
+
+/**
+ * A Mark was drawn. `target` names the element it points at (absent for an
+ * area of the page), `area` is where that target is in the viewport, and
+ * `number` is a label's number.
+ */
+export interface MarkEffect {
+  type: 'mark';
+  kind: MarkKind;
+  target?: string;
+  number?: number;
+  area: ViewportRect;
+}
 
 export interface PageToolOutcome {
   result: PageToolResult;
@@ -117,11 +130,22 @@ const LOOK: PageToolDefinition = {
 const MARK: PageToolDefinition = {
   name: 'mark',
   description:
-    'Draw a box around a visible element of the page, to show the reader where it is. Takes an element reference from the latest look. Changes nothing on the page; the box is cleared when the reader asks the next question.',
+    'Draw a Mark on the visible page, to show the reader where something is: a box around it, an arrow pointing at it, a highlight over it, or a numbered label on it (for steps: 1, then 2, then 3). Point at an element reference from the latest look; only when there is no element to point at (a spike in a chart, a spot in a video frame) give an area of the visible page in viewport pixels instead. Changes nothing on the page; Marks are cleared when the reader asks the next question.',
   inputSchema: {
     type: 'object',
-    properties: { element: { type: 'string', description: 'An element reference from look, such as e3.' } },
-    required: ['element'],
+    properties: {
+      kind: { type: 'string', enum: [...MARK_KINDS], description: 'The kind of Mark. Defaults to box.' },
+      element: { type: 'string', description: 'An element reference from look, such as e3.' },
+      area: {
+        type: 'object',
+        description:
+          'Instead of an element: a rectangle of the visible page in viewport pixels (origin at the top-left of the viewport look reports).',
+        properties: { left: { type: 'number' }, top: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' } },
+        required: ['left', 'top', 'width', 'height'],
+        additionalProperties: false,
+      },
+      number: { type: 'integer', minimum: 1, maximum: 99, description: "A label's number. Defaults to the next one." },
+    },
     additionalProperties: false,
   },
 };
@@ -171,6 +195,8 @@ export interface PageTools {
   run(call: PageToolCall, context?: PageToolCallContext): Promise<PageToolOutcome>;
   /** Remove the current answer's Marks. Returns true if there were any. */
   clearMarks(): boolean;
+  /** Hide the Marks (during Selection Mode, so they stay out of a new Selection), or bring them back. */
+  setMarksHidden(hidden: boolean): void;
   /** Remove everything the page tools added to the page. */
   dispose(): void;
 }
@@ -214,6 +240,10 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
   const offered = offeredPageTools(settings);
   const refs = new Refs();
   let marks: MarksLayer | null = null;
+  // The highest label number in the current answer's Marks, so labels count on by default.
+  let labelsDrawn = 0;
+  // Marks are hidden during Selection Mode.
+  let hiddenForSelection = false;
 
   /**
    * Every Page Action, carried out or refused, returns a short result plus a
@@ -269,12 +299,28 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
       return { result: { content: [{ type: 'text', text: list }, image] } };
     },
     mark: (input) => {
-      const element = refs.element(input.element);
-      if (!element) return { result: refused(unknownElement(input.element)) };
+      const kind = input.kind ?? 'box';
+      if (!MARK_KINDS.includes(kind as MarkKind)) {
+        return { result: refused(`There is no ${JSON.stringify(kind)} Mark. Use one of: ${MARK_KINDS.join(', ')}.`) };
+      }
+      let number: number | undefined;
+      if (kind === 'label') {
+        number = input.number === undefined ? labelsDrawn + 1 : Number(input.number);
+        if (!Number.isInteger(number) || number < 1 || number > 99) {
+          return { result: refused('A label number must be a whole number from 1 to 99.') };
+        }
+      }
+      const where = markTarget(input, refs, viewportOf(doc));
+      if ('refusal' in where) return { result: refused(where.refusal) };
       marks ??= new MarksLayer(doc);
-      marks.box(element.getBoundingClientRect());
-      const target = nameOf(element) || roleOf(element) || 'element';
-      return { result: ok(`Marked ${refs.ref(element)} (${describeElement(element)}).`), effect: { type: 'mark', target } };
+      if (hiddenForSelection) marks.setHidden(true);
+      marks.draw(kind as MarkKind, where.anchor, number);
+      if (kind === 'label') labelsDrawn = Math.max(labelsDrawn, number!);
+      const effect: MarkEffect = { type: 'mark', kind: kind as MarkKind, area: where.area };
+      if (where.target !== undefined) effect.target = where.target;
+      if (number !== undefined) effect.number = number;
+      const what = kind === 'label' ? `label ${number}` : String(kind);
+      return { result: ok(`Drew a ${what} at ${where.described}.`), effect };
     },
     scroll_to: (input, context) => {
       const found = scrollTarget(doc, refs, input, context.pageText ?? '');
@@ -314,7 +360,14 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
         return { result: refused(`The ${tool.name} tool failed: ${error instanceof Error ? error.message : String(error)}`) };
       }
     },
-    clearMarks: () => marks?.clear() ?? false,
+    clearMarks() {
+      labelsDrawn = 0;
+      return marks?.clear() ?? false;
+    },
+    setMarksHidden(hide) {
+      hiddenForSelection = hide;
+      marks?.setHidden(hide);
+    },
     dispose() {
       marks?.remove();
       marks = null;
@@ -494,6 +547,59 @@ function nameOf(element: Element): string {
   }
   return '';
 }
+
+type MarkTarget =
+  | { anchor: MarkAnchor; area: ViewportRect; target?: string; described: string }
+  | { refusal: string };
+
+/** What a mark call points at: an element it looked up, or an area of the visible page. */
+function markTarget(input: Record<string, unknown>, refs: Refs, viewport: { width: number; height: number }): MarkTarget {
+  if (input.element !== undefined && input.area !== undefined) {
+    return { refusal: 'Give either an element or an area, not both.' };
+  }
+  if (input.area === undefined) {
+    const element = refs.element(input.element);
+    if (!element) return { refusal: unknownElement(input.element) };
+    return {
+      anchor: { element },
+      area: plainRect(element.getBoundingClientRect()),
+      target: nameOf(element) || roleOf(element) || 'element',
+      described: `${refs.ref(element)} (${describeElement(element)})`,
+    };
+  }
+  const area = input.area as Record<string, unknown> | null;
+  const [left, top, width, height] = ['left', 'top', 'width', 'height'].map((key) =>
+    typeof area?.[key] === 'number' ? (area[key] as number) : NaN,
+  ) as [number, number, number, number];
+  if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+    return { refusal: 'An area needs a left, top, width and height in viewport pixels, with a positive width and height.' };
+  }
+  // Only the visible page is in reach: keep the part of the area that is in view.
+  const visible = {
+    left: Math.max(0, left),
+    top: Math.max(0, top),
+    right: Math.min(viewport.width, left + width),
+    bottom: Math.min(viewport.height, top + height),
+  };
+  if (visible.right <= visible.left || visible.bottom <= visible.top) {
+    return {
+      refusal: `That area is outside the visible page (the viewport is ${viewport.width}x${viewport.height}). Only what is in view can be marked.`,
+    };
+  }
+  const clipped = { left: visible.left, top: visible.top, width: visible.right - visible.left, height: visible.bottom - visible.top };
+  return {
+    anchor: { area: clipped },
+    area: clipped,
+    described: `the area ${clipped.left},${clipped.top} ${clipped.width}x${clipped.height}`,
+  };
+}
+
+function viewportOf(doc: Document) {
+  const view = doc.defaultView!;
+  return { width: view.innerWidth, height: view.innerHeight };
+}
+
+const plainRect = (rect: DOMRect): ViewportRect => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
 
 const ok = (text: string): PageToolResult => ({ content: [{ type: 'text', text }] });
 
