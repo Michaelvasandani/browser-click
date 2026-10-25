@@ -2,6 +2,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ModelClient } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
+import type { PageTools } from '@/lib/page-tools';
 import { clampPanel, placePanel, type Position } from '@/lib/placement';
 import type { CapturedImage } from './overlay';
 import { Panel } from './panel/Panel';
@@ -41,9 +42,10 @@ export class PanelHost {
     pageContext: PageContext,
     settings: PageSettings,
     client: ModelClient,
+    pageTools: PageTools | undefined,
     callbacks: PanelCallbacks,
   ) {
-    this.store = new PanelStore(firstSelection, pageContext, settings, client);
+    this.store = new PanelStore(firstSelection, pageContext, settings, client, pageTools);
     this.host = document.createElement('browser-click-panel');
     // Closed, so the page's own scripts cannot read the Conversation out of the DOM.
     const shadow = this.host.attachShadow({ mode: 'closed' });

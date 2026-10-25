@@ -164,6 +164,11 @@ const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: (
       {turn.selections.length > 0 && <Thumbnails selections={turn.selections} />}
       <p className="user-question">{turn.question}</p>
       {turn.answer && <Answer text={turn.answer} />}
+      {turn.steps.map((step, index) => (
+        <p key={index} className="status page-step">
+          Marked <em>{step.target}</em>
+        </p>
+      ))}
       {(turn.searching || turn.status === 'waiting') && (
         <p className="status waiting" role="status">
           <span className="dots" aria-hidden="true">

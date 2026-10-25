@@ -1,5 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { ModelClient, ModelStreamItem, StreamParams } from '../conversation';
+import type { ModelClient, ModelStreamItem, PageToolCallItem, StreamParams } from '../conversation';
+import type { PageToolResult } from '../page-tools';
 
 type Block = Anthropic.ContentBlock;
 
@@ -83,4 +84,31 @@ export function contentOf(request: StreamParams, index: number): Anthropic.Conte
   const message = request.messages.at(index);
   if (!message) throw new Error(`no message at ${index}`);
   return typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content;
+}
+
+/** A page tool call as the model stream delivers it, with the result the Conversation returns. */
+export interface ScriptedPageToolCall extends PageToolCallItem {
+  /** Resolves when the Conversation returns this call's result. */
+  result: Promise<PageToolResult>;
+}
+
+/** A page tool call for a scripted response. */
+export function pageToolCall(name: string, input: Record<string, unknown> = {}): ScriptedPageToolCall {
+  let settle!: (result: PageToolResult) => void;
+  const result = new Promise<PageToolResult>((resolve) => (settle = resolve));
+  return { type: 'page-tool-call', call: { name, input }, respond: settle, result };
+}
+
+/** The text of a page tool result. */
+export const resultText = (result: PageToolResult) =>
+  result.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n');
+
+/** The element reference a look result gives the element with this name. */
+export function refOf(result: PageToolResult, name: string): string {
+  const line = resultText(result)
+    .split('\n')
+    .find((l) => l.includes(`"${name}"`));
+  const ref = line?.match(/^(\S+) /)?.[1];
+  if (!ref) throw new Error(`No element named "${name}" in:\n${resultText(result)}`);
+  return ref;
 }

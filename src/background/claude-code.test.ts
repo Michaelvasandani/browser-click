@@ -68,6 +68,37 @@ describe('ClaudeCodeTurns', () => {
     });
   });
 
+  it('passes a page tool call from the host to the page, and its result back to the host', () => {
+    const turns = new ClaudeCodeTurns();
+    turns.ask();
+    const before = play(turns, [
+      textStart,
+      textDelta('Let me point at it. '),
+      streamEvent({
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id: 't1', name: 'mcp__browser-click__mark', input: {} },
+      }),
+      assistant('Let me point at it. ', 'tool_use'),
+    ]);
+    // claude's own view of the MCP call is not a search, and adds no text.
+    expect(before.some((m) => m.type === 'item' && m.item.type === 'event' && m.item.event.type === 'content_block_start' && m.item.event.content_block.type === 'server_tool_use')).toBe(false);
+
+    const call = { callId: 'c1', name: 'mark', input: { element: 'e2' } };
+    expect(turns.pageToolCall(call)).toEqual([
+      { type: 'page-tool-call', callId: 'c1', call: { name: 'mark', input: { element: 'e2' } } },
+    ]);
+    const result = { content: [{ type: 'text' as const, text: 'Marked e2.' }] };
+    expect(turns.pageToolResult('c1', result)).toEqual([{ type: 'page-tool-result', callId: 'c1', result }]);
+    // Each call is answered once.
+    expect(turns.pageToolResult('c1', result)).toEqual([]);
+    expect(turns.pageToolResult('unknown', result)).toEqual([]);
+
+    const after = play(turns, [textStart, textDelta('There.'), assistant('There.'), success]);
+    expect(texts(after)).toEqual(['There.']);
+    expect(after.at(-1)).toEqual({ type: 'end' });
+  });
+
   it('passes on a refusal', () => {
     const turns = new ClaudeCodeTurns();
     turns.ask();

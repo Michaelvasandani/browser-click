@@ -9,7 +9,18 @@ import {
   type SelectionInput,
 } from './conversation';
 import type { PageContext } from './page-context';
-import { contentOf, FakeModel, response, text } from './testing/fake-model';
+import { createPageTools } from './page-tools';
+import {
+  contentOf,
+  FakeModel,
+  pageToolCall,
+  refOf,
+  response,
+  resultText,
+  text,
+  type ScriptedPageToolCall,
+} from './testing/fake-model';
+import { marksOn, pageDocument } from './testing/page-document';
 
 const selection = (data = 'aW1hZ2U='): SelectionInput => ({ image: { mediaType: 'image/png', data } });
 
@@ -640,5 +651,159 @@ describe('Conversation: unexpected failures', () => {
     model.respond(response([text('ok')]));
     await conversation.ask('Something else?');
     expect(model.lastRequest.messages.map((m) => m.role)).toEqual(['user']);
+  });
+});
+
+describe('Conversation: Marks', () => {
+  const SETTINGS_PAGE = `
+    <h1>Settings</h1>
+    <label data-rect="40,100,200,16"><input type="checkbox" role="switch" data-rect="40,100,30,16"> Notifications</label>
+    <button data-rect="40,200,80,30">Save</button>`;
+
+  /** Looks the page up, then marks the element with this name, then answers. */
+  function lookThenMark(name: string, answer = 'It is here.') {
+    const look = pageToolCall('look');
+    let mark: ScriptedPageToolCall | undefined;
+    const script = async function* () {
+      yield look;
+      mark = pageToolCall('mark', { element: refOf(await look.result, name) });
+      yield mark;
+      yield* response([text(answer)]);
+    };
+    return { script, look, mark: () => mark! };
+  }
+
+  function setupOnPage(body: string, { drawOnPage = true } = {}) {
+    const doc = pageDocument(body);
+    const pageTools = createPageTools(doc, { drawOnPage });
+    return { doc, pageTools, ...setup({ pageTools }) };
+  }
+
+  it('draws a box around the element the Assistant looked up, and tells the Panel', async () => {
+    const { doc, model, events, conversation } = setupOnPage(SETTINGS_PAGE);
+    const before = doc.body.innerHTML;
+    const { script, look, mark } = lookThenMark('Notifications');
+    model.respond(script);
+    await conversation.ask("Where's the notifications toggle?");
+
+    const seen = resultText(await look.result);
+    expect(seen).toMatch(/viewport: 1024x768/i);
+    expect(seen).toMatch(/switch "Notifications"/);
+    expect(seen).toMatch(/button "Save"/);
+    expect((await mark().result).isError).toBeFalsy();
+
+    expect(events).toContainEqual({ type: 'mark', target: 'Notifications' });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+    const [box, ...others] = marksOn(doc);
+    expect(others).toEqual([]);
+    // Around the toggle, in its own layer that lets clicks through to the page.
+    expect(box!.left).toBeLessThanOrEqual(40);
+    expect(box!.top).toBeLessThanOrEqual(100);
+    expect(box!.left + box!.width).toBeGreaterThanOrEqual(70);
+    expect(box!.top + box!.height).toBeGreaterThanOrEqual(116);
+    expect(box!.pointerEvents).toBe('none');
+    // The page itself is unchanged.
+    expect(doc.body.innerHTML).toBe(before);
+  });
+
+  it("leaves the Panel and browser-click's other elements out of what the Assistant sees", async () => {
+    const { doc, model, conversation } = setupOnPage(SETTINGS_PAGE);
+    const panel = doc.createElement('browser-click-panel');
+    panel.innerHTML = '<button>Allow</button>';
+    panel.attachShadow({ mode: 'closed' }).innerHTML = '<button>Deny</button>';
+    doc.documentElement.append(panel);
+    const overlay = doc.createElement('browser-click-overlay');
+    overlay.innerHTML = '<div role="dialog" aria-label="Select an area">Drag</div>';
+    doc.body.append(overlay);
+
+    // A Mark first, so the Marks layer is on the page too.
+    const { script, look } = lookThenMark('Notifications');
+    model.respond(script);
+    await conversation.ask('Where is it?');
+    const secondLook = pageToolCall('look');
+    model.respond([secondLook, ...response([text('ok')])]);
+    await conversation.ask('What else is here?');
+
+    for (const seen of [resultText(await look.result), resultText(await secondLook.result)]) {
+      expect(seen).toMatch(/Notifications/);
+      expect(seen).not.toMatch(/Allow|Deny|Select an area|browser-click/i);
+    }
+  });
+
+  it("clears an answer's Marks when the next question is sent", async () => {
+    const { doc, model, events, conversation } = setupOnPage(SETTINGS_PAGE);
+    model.respond(lookThenMark('Notifications').script);
+    await conversation.ask('Where is it?');
+    expect(marksOn(doc)).toHaveLength(1);
+
+    let marksWhenSent = -1;
+    model.respond(async function* () {
+      marksWhenSent = marksOn(doc).length;
+      yield* response([text('Anything else?')]);
+    });
+    await conversation.ask('Thanks. And then?');
+
+    expect(marksWhenSent).toBe(0);
+    expect(marksOn(doc)).toEqual([]);
+    const secondTurn = events.slice(events.findLastIndex((e) => e.type === 'turn-started'));
+    expect(secondTurn).toContainEqual({ type: 'marks-cleared' });
+  });
+
+  it('tells the Assistant it can draw Marks when drawing on the page is on', async () => {
+    const { model, conversation } = setupOnPage(SETTINGS_PAGE);
+    model.respond(response([text('ok')]));
+    await conversation.ask('Where is it?');
+    expect(String(model.lastRequest.system)).toMatch(/\bmarks?\b/i);
+  });
+
+  it('offers no page tools when drawing on the page is off, and refuses a call to one anyway', async () => {
+    const { doc, pageTools, model, events, conversation } = setupOnPage(SETTINGS_PAGE, { drawOnPage: false });
+    expect(pageTools.offered).toEqual([]);
+    const look = pageToolCall('look');
+    const mark = pageToolCall('mark', { element: 'e1' });
+    model.respond([look, mark, ...response([text('ok')])]);
+    await conversation.ask('Where is it?');
+
+    expect(String(model.lastRequest.system)).not.toMatch(/\bmarks?\b|\blook\b/i);
+    expect(await look.result).toMatchObject({ isError: true });
+    expect(await mark.result).toMatchObject({ isError: true });
+    expect(marksOn(doc)).toEqual([]);
+    expect(events.some((e) => e.type === 'mark')).toBe(false);
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('tells the Assistant nothing about Marks without page tools, as on the API key backend', async () => {
+    const { model, conversation } = setup();
+    model.respond(response([text('ok')]));
+    await conversation.ask('Where is it?');
+    expect(String(model.lastRequest.system)).not.toMatch(/\bmarks?\b/i);
+  });
+
+  it('lists only what is in view and not hidden', async () => {
+    const { model, conversation } = setupOnPage(`
+      <button data-rect="10,10,80,20">In view</button>
+      <button data-rect="10,2000,80,20">Below the fold</button>
+      <button data-rect="0,0,0,0">No size</button>
+      <button hidden>Hidden</button>
+      <div style="display: none"><a href="/x">Inside hidden</a></div>`);
+    const look = pageToolCall('look');
+    model.respond([look, ...response([text('ok')])]);
+    await conversation.ask('What is here?');
+
+    const seen = resultText(await look.result);
+    expect(seen).toMatch(/button "In view"/);
+    expect(seen).not.toMatch(/Below the fold|No size|Hidden/);
+  });
+
+  it('refuses a Mark at an element the Assistant never looked up', async () => {
+    const { doc, model, events, conversation } = setupOnPage(SETTINGS_PAGE);
+    const mark = pageToolCall('mark', { element: 'e99' });
+    model.respond([mark, ...response([text('ok')])]);
+    await conversation.ask('Where is it?');
+
+    expect(await mark.result).toMatchObject({ isError: true });
+    expect(resultText(await mark.result)).toMatch(/look/);
+    expect(marksOn(doc)).toEqual([]);
+    expect(events.some((e) => e.type === 'mark')).toBe(false);
   });
 });

@@ -7,6 +7,7 @@ import type {
 } from '@/lib/messages';
 import type { ModelClient } from '@/lib/conversation';
 import { extractPageContext } from '@/lib/page-context';
+import { createPageTools, type PageTools } from '@/lib/page-tools';
 import { openClaudeCodeClient, type ClaudeCodeClient } from './claude-code-port';
 import { portModelClient } from './model-port';
 import { runSelectionMode } from './overlay';
@@ -20,6 +21,8 @@ export function startPage() {
   let panel: PanelHost | null = null;
   // The Claude Code backend's client lives as long as its Panel.
   let claudeCode: ClaudeCodeClient | null = null;
+  // So do the page tools, and the Marks they drew.
+  let pageTools: PageTools | null = null;
   let selecting = false;
   // Set when "Add selection" could not capture the tab. The next toolbar click
   // (which restores access) then adds to this Conversation instead of replacing it.
@@ -36,6 +39,8 @@ export function startPage() {
     panel = null;
     claudeCode?.close();
     claudeCode = null;
+    pageTools?.dispose();
+    pageTools = null;
     resumeAfterAccessLost = false;
   }
 
@@ -94,8 +99,12 @@ export function startPage() {
       if (!settings) return;
       closePanel();
       let client: ModelClient = portModelClient;
-      if (settings.backend === 'claude-code') client = claudeCode = openClaudeCodeClient(settings, pageContext.title);
-      panel = new PanelHost(image, pageContext, settings, client, {
+      if (settings.backend === 'claude-code') {
+        client = claudeCode = openClaudeCodeClient(settings, pageContext.title);
+        // Only Claude Code is given page tools for now; the API key backend gets none.
+        pageTools = createPageTools(document, { drawOnPage: settings.drawOnPage });
+      }
+      panel = new PanelHost(image, pageContext, settings, client, pageTools ?? undefined, {
         onClose: closePanel,
         onAddSelection: addSelection,
       });

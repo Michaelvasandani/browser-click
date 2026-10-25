@@ -1,5 +1,11 @@
 import { browser, type Browser } from 'wxt/browser';
-import { ModelError, type ModelClient, type ModelStreamItem, type StreamParams } from '@/lib/conversation';
+import {
+  ModelError,
+  type ModelClient,
+  type ModelStreamItem,
+  type PageToolCallItem,
+  type StreamParams,
+} from '@/lib/conversation';
 import {
   CLAUDE_CODE_PORT,
   type ClaudeCodePortMessage,
@@ -52,6 +58,7 @@ export function openClaudeCodeClient(settings: PageSettings, title: string): Cla
       type: 'open',
       model: settings.model,
       webSearch: settings.webSearch,
+      drawOnPage: settings.drawOnPage,
       title,
       sessionId: resumeId,
     };
@@ -85,6 +92,7 @@ export function openClaudeCodeClient(settings: PageSettings, title: string): Cla
             continue;
           }
           if (message.type === 'item') yield message.item;
+          else if (message.type === 'page-tool-call') yield pageToolCallItem(active, message);
           else if (message.type === 'error') throw new ModelError(message.kind, message.message);
           else if (message.type === 'end') return;
         }
@@ -98,6 +106,28 @@ export function openClaudeCodeClient(settings: PageSettings, title: string): Cla
       port?.disconnect();
       port = null;
       notify();
+    },
+  };
+}
+
+/** A page tool call from claude, answered over the port it came in on. */
+function pageToolCallItem(
+  port: Browser.runtime.Port,
+  { callId, call }: Extract<ClaudeCodePortMessage, { type: 'page-tool-call' }>,
+): PageToolCallItem {
+  let answered = false;
+  return {
+    type: 'page-tool-call',
+    call,
+    respond(result) {
+      if (answered) return;
+      answered = true;
+      const reply: ClaudeCodePortRequest = { type: 'page-tool-result', callId, result };
+      try {
+        port.postMessage(reply);
+      } catch {
+        // The port closed meanwhile: the answer is over, and so is this call.
+      }
     },
   };
 }

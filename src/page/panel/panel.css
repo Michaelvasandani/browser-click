@@ -233,6 +233,13 @@
   font-size: 13px;
 }
 
+/* One line per thing the Assistant did on the page ("Marked Notifications"). */
+.page-step em {
+  color: var(--fg);
+  font-style: normal;
+  font-weight: 600;
+}
+
 .waiting {
   display: flex;
   align-items: center;

@@ -3,11 +3,19 @@
 // Messages from Chrome go to claude's stdin as stream-json; claude's stream-json
 // output comes back as native messages. The host exits when claude does or
 // when Chrome disconnects. Plain Node, no dependencies: it runs from this folder.
+//
+// When the extension offers page tools, the host also serves them to claude
+// through mcp-server.mjs (given to claude with --mcp-config). That server
+// reaches back to this host over a private socket; each tool call goes on to
+// the extension as a page-tool-call, and its page-tool-result comes back.
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { chmodSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readLines } from './read-lines.mjs';
 
 const CONFIG_PATH = join(homedir(), '.browser-click', 'host-config.json');
 
@@ -19,6 +27,13 @@ const FORWARDED_TYPES = new Set(['system', 'stream_event', 'assistant', 'result'
 
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9.\-]*$/i;
 
+const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** The MCP server's name, so claude calls its tools mcp__browser-click__<name>. */
+const MCP_SERVER_NAME = 'browser-click';
+
+const MCP_SERVER_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'mcp-server.mjs');
+
 const config = loadConfig();
 // Chrome starts the host with a minimal PATH. A claude installed through npm is
 // a Node script, so the Node running this host must be findable.
@@ -27,6 +42,8 @@ const env = { ...process.env, PATH: [dirname(process.execPath), process.env.PATH
 /** @type {import('node:child_process').ChildProcessWithoutNullStreams | null} */
 let child = null;
 let stderrTail = '';
+/** @type {ReturnType<typeof servePageTools> | null} */
+let pageTools = null;
 
 readNativeMessages(process.stdin, (message) => {
   try {
@@ -37,6 +54,7 @@ readNativeMessages(process.stdin, (message) => {
 });
 process.stdin.on('end', () => {
   child?.kill();
+  pageTools?.close();
   process.exit(0);
 });
 
@@ -50,6 +68,8 @@ function handle(message) {
       return write({ type: 'user', message: { role: 'user', content: message.content } });
     case 'stop':
       return write({ type: 'control_request', request_id: randomUUID(), request: { subtype: 'interrupt' } });
+    case 'page-tool-result':
+      return pageTools?.result(message.callId, message.result);
     default:
       throw new Error(`Unknown message type: ${message.type}`);
   }
@@ -80,12 +100,24 @@ async function ping() {
  * Starts claude for one Conversation. With `resume`, continues the saved
  * session `sessionId` (after an earlier host for it has exited).
  */
-function open({ model, webSearch, systemPrompt, title, sessionId, resume }) {
+function open({ model, webSearch, pageTools: tools = [], systemPrompt, title, sessionId, resume }) {
   if (child) throw new Error('Already open.');
   if (typeof model !== 'string' || !MODEL_PATTERN.test(model)) throw new Error('Invalid model.');
   if (typeof systemPrompt !== 'string') throw new Error('Missing system prompt.');
+  if (!Array.isArray(tools) || !tools.every(isToolDefinition)) throw new Error('Invalid page tools.');
   const id = typeof sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(sessionId) ? sessionId : randomUUID();
   mkdirSync(config.threadsDir, { recursive: true });
+
+  if (tools.length) pageTools = servePageTools(tools);
+  const allowedTools = [
+    ...(webSearch ? ['WebSearch'] : []),
+    ...tools.map((tool) => `mcp__${MCP_SERVER_NAME}__${tool.name}`),
+  ];
+  const mcpConfig = pageTools && {
+    mcpServers: {
+      [MCP_SERVER_NAME]: { type: 'stdio', command: process.execPath, args: [MCP_SERVER_SCRIPT, pageTools.socketPath] },
+    },
+  };
 
   const args = [
     '-p',
@@ -96,10 +128,12 @@ function open({ model, webSearch, systemPrompt, title, sessionId, resume }) {
     '--model', model,
     '--effort', 'low',
     '--system-prompt', systemPrompt,
-    // Claude Code is a coding agent: give it nothing but web search, and none of
-    // the user's settings, hooks, CLAUDE.md files or MCP servers.
+    // Claude Code is a coding agent: give it nothing but web search and
+    // browser-click's own page tools, and none of the user's settings, hooks,
+    // CLAUDE.md files or MCP servers.
     '--tools', webSearch ? 'WebSearch' : '',
-    ...(webSearch ? ['--allowedTools', 'WebSearch'] : []),
+    ...(allowedTools.length ? ['--allowedTools', allowedTools.join(',')] : []),
+    ...(mcpConfig ? ['--mcp-config', JSON.stringify(mcpConfig)] : []),
     '--permission-mode', 'dontAsk',
     '--setting-sources', '',
     '--strict-mcp-config',
@@ -123,11 +157,79 @@ function open({ model, webSearch, systemPrompt, title, sessionId, resume }) {
     if (FORWARDED_TYPES.has(output.type)) send({ type: 'output', output });
   });
   child.on('exit', (code, signal) => {
+    pageTools?.close();
     send({ type: 'exit', code, signal, stderr: stderrTail.trim() });
     // Let the exit message reach Chrome before going away.
     process.stdout.write('', () => process.exit(0));
   });
   send({ type: 'opened', sessionId: id });
+}
+
+function isToolDefinition(tool) {
+  return (
+    tool !== null &&
+    typeof tool === 'object' &&
+    typeof tool.name === 'string' &&
+    TOOL_NAME_PATTERN.test(tool.name) &&
+    typeof tool.description === 'string' &&
+    tool.inputSchema !== null &&
+    typeof tool.inputSchema === 'object'
+  );
+}
+
+/**
+ * Listens on a private socket for mcp-server.mjs. Sends it the tool
+ * definitions, forwards its calls to the extension under a fresh call ID, and
+ * routes each page-tool-result back to the call it answers.
+ */
+function servePageTools(tools) {
+  // Short: socket paths are limited to about 100 bytes.
+  const socketPath = join(tmpdir(), `bc-${randomBytes(6).toString('hex')}.sock`);
+  /** @type {Map<string, { socket: import('node:net').Socket, id: unknown }>} */
+  const calls = new Map();
+  const server = createServer((socket) => {
+    socket.write(JSON.stringify({ type: 'tools', tools }) + '\n');
+    readLines(socket, (line) => {
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (message.type !== 'call' || !tools.some((tool) => tool.name === message.name)) return;
+      const callId = randomUUID();
+      calls.set(callId, { socket, id: message.id });
+      send({ type: 'page-tool-call', callId, name: message.name, input: message.input ?? {} });
+    });
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      for (const [callId, call] of calls) if (call.socket === socket) calls.delete(callId);
+    });
+  });
+  // Only this user may connect: private from the moment the socket exists.
+  const umask = process.umask(0o077);
+  try {
+    server.listen(socketPath, () => {
+      try {
+        chmodSync(socketPath, 0o600);
+      } catch {}
+    });
+  } finally {
+    process.umask(umask);
+  }
+  return {
+    socketPath,
+    result(callId, result) {
+      const call = calls.get(callId);
+      if (!call) return;
+      calls.delete(callId);
+      call.socket.write(JSON.stringify({ type: 'result', id: call.id, result }) + '\n');
+    },
+    close() {
+      server.close();
+      rmSync(socketPath, { force: true });
+    },
+  };
 }
 
 function write(input) {
@@ -175,20 +277,6 @@ function readNativeMessages(stream, onMessage) {
       const body = buffer.subarray(4, 4 + length).toString('utf8');
       buffer = buffer.subarray(4 + length);
       onMessage(JSON.parse(body));
-    }
-  });
-}
-
-function readLines(stream, onLine) {
-  let buffer = '';
-  stream.setEncoding('utf8');
-  stream.on('data', (chunk) => {
-    buffer += chunk;
-    let newline;
-    while ((newline = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (line.trim()) onLine(line);
     }
   });
 }

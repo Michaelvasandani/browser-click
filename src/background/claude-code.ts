@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { browser, type Browser } from 'wxt/browser';
-import { SYSTEM_PROMPT, type ModelErrorKind } from '@/lib/conversation';
+import { systemPrompt, type ModelErrorKind } from '@/lib/conversation';
+import { offeredPageTools, type PageToolResult } from '@/lib/page-tools';
 import {
   CLAUDE_CODE_PORT,
   type ClaudeCodeCheck,
@@ -19,12 +20,26 @@ export type ClaudeCodeOutput =
   | { type: 'assistant'; message: Anthropic.Message }
   | { type: 'result'; subtype: string; is_error?: boolean; result?: string; errors?: string[] };
 
+/** A page tool call from claude, as the host's MCP server received it. `name` is the bare tool name. */
+export interface HostPageToolCall {
+  callId: string;
+  name: string;
+  input: unknown;
+}
+
 /** Host → Background. */
 export type HostMessage =
   | { type: 'opened'; sessionId: string }
+  | ({ type: 'page-tool-call' } & HostPageToolCall)
   | { type: 'output'; output: ClaudeCodeOutput }
   | { type: 'exit'; code: number | null; signal: string | null; stderr: string }
   | { type: 'error'; message: string };
+
+/** Background → host, besides opening: questions, interrupts and page tool results. */
+export type HostRequest =
+  | { type: 'ask'; content: unknown }
+  | { type: 'stop' }
+  | { type: 'page-tool-result'; callId: string; result: PageToolResult };
 
 /**
  * Turns claude's stream-json output for one Conversation into the stream items
@@ -32,6 +47,10 @@ export type HostMessage =
  * Claude Code's WebSearch calls show as searches, and each answer ends with a
  * final message built from its assistant turns. Output from an answer the user
  * stopped is dropped until claude reports that answer's result.
+ *
+ * Page tool calls reach it from the host's MCP server rather than from claude's
+ * output (which only shows claude's side of the call): each goes to the page
+ * with its call ID, and the page's result goes back to the host once.
  */
 export class ClaudeCodeTurns {
   private active = false;
@@ -41,6 +60,8 @@ export class ClaudeCodeTurns {
   private stopReason: Anthropic.StopReason = 'end_turn';
   private nextIndex = 0;
   private textIndex = 0;
+  /** Page tool calls sent to the page and not yet answered. */
+  private pendingCalls = new Set<string>();
 
   /** True while an answer is being generated for the page. */
   get busy() {
@@ -59,6 +80,18 @@ export class ClaudeCodeTurns {
     this.active = false;
     this.stoppedPending++;
     return true;
+  }
+
+  /** claude called a page tool. Returns the messages for the page. */
+  pageToolCall(call: HostPageToolCall): ClaudeCodePortMessage[] {
+    this.pendingCalls.add(call.callId);
+    return [{ type: 'page-tool-call', callId: call.callId, call: { name: call.name, input: call.input } }];
+  }
+
+  /** The page answered a page tool call. Returns the messages for the host. */
+  pageToolResult(callId: string, result: PageToolResult): HostRequest[] {
+    if (!this.pendingCalls.delete(callId)) return [];
+    return [{ type: 'page-tool-result', callId, result }];
   }
 
   output(output: ClaudeCodeOutput): ModelPortMessage[] {
@@ -164,6 +197,7 @@ function serve(port: Browser.runtime.Port) {
   const turns = new ClaudeCodeTurns();
   let open: Extract<ClaudeCodePortRequest, { type: 'open' }> | null = null;
   let host: Browser.runtime.Port | null = null;
+  const toHost = (request: HostRequest) => host?.postMessage(request);
   let sessionId: string | undefined;
   /** claude has taken a question, so its session is saved and can be resumed. */
   let resumable = false;
@@ -181,6 +215,9 @@ function serve(port: Browser.runtime.Port) {
       if (message.type === 'opened') {
         sessionId = message.sessionId;
         post({ type: 'session', sessionId });
+      } else if (message.type === 'page-tool-call') {
+        const { callId, name, input } = message;
+        turns.pageToolCall({ callId, name, input }).forEach(post);
       } else if (message.type === 'output') {
         if (message.output.type === 'system' && message.output.subtype === 'init') resumable = true;
         turns.output(message.output).forEach(post);
@@ -196,11 +233,14 @@ function serve(port: Browser.runtime.Port) {
       const why = browser.runtime.lastError?.message ?? 'Claude Code stopped unexpectedly.';
       turns.exit(why).forEach(post);
     });
+    const pageTools = offeredPageTools({ drawOnPage: open.drawOnPage });
     native.postMessage({
       type: 'open',
       model: open.model,
       webSearch: open.webSearch,
-      systemPrompt: SYSTEM_PROMPT,
+      // Served to claude by the host's MCP server; none means no MCP server at all.
+      pageTools,
+      systemPrompt: systemPrompt(pageTools),
       title: open.title,
       sessionId,
       resume: resumable,
@@ -219,9 +259,11 @@ function serve(port: Browser.runtime.Port) {
       if (turns.busy) return;
       if (!host) connect();
       turns.ask();
-      host?.postMessage({ type: 'ask', content: request.content });
+      toHost({ type: 'ask', content: request.content });
     } else if (request.type === 'stop') {
-      if (turns.stop()) host?.postMessage({ type: 'stop' });
+      if (turns.stop()) toHost({ type: 'stop' });
+    } else if (request.type === 'page-tool-result') {
+      turns.pageToolResult(request.callId, request.result).forEach(toHost);
     }
   });
 

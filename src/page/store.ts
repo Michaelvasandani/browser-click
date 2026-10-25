@@ -1,6 +1,7 @@
 import { Conversation, type ConversationEvent, type ModelClient, type Source } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
+import type { PageTools } from '@/lib/page-tools';
 import type { CapturedImage } from './overlay';
 
 export interface SelectionView {
@@ -9,6 +10,9 @@ export interface SelectionView {
   /** The page text sent with this Selection was cut off for length. */
   pageTextTruncated: boolean;
 }
+
+/** Something the Assistant did on the page during an answer, shown as one line in it. */
+export type PageStep = { kind: 'mark'; target: string };
 
 export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'stopped' | 'error' | 'refused';
 
@@ -21,6 +25,8 @@ export interface TurnView {
   /** A web search is running. */
   searching: boolean;
   sources: Source[];
+  /** Marks drawn (and, later, Page Actions taken) during this answer, in order. */
+  steps: PageStep[];
   /** Why the turn failed or was declined, in plain words. */
   error?: string;
   /** The failure is about settings the user can change in options. */
@@ -53,11 +59,13 @@ export class PanelStore {
     firstPageContext: PageContext,
     settings: PageSettings,
     client: ModelClient,
+    pageTools?: PageTools,
   ) {
     this.conversation = new Conversation({
       client,
       model: settings.model,
       webSearch: settings.webSearch,
+      pageTools,
       onEvent: (event) => this.onConversationEvent(event),
     });
     this.addSelection(firstSelection, firstPageContext);
@@ -128,6 +136,7 @@ export class PanelStore {
           status: 'waiting',
           searching: false,
           sources: [],
+          steps: [],
         };
         this.update({
           turns: [...this.state.turns, turn],
@@ -145,6 +154,14 @@ export class PanelStore {
         break;
       case 'sources':
         this.updateLastTurn({ sources: event.sources });
+        break;
+      case 'mark': {
+        const turn = this.state.turns.at(-1);
+        if (turn) this.updateLastTurn({ steps: [...turn.steps, { kind: 'mark', target: event.target }] });
+        break;
+      }
+      case 'marks-cleared':
+        // The earlier answer's lines stay: they record what it showed.
         break;
       case 'error':
         this.updateLastTurn({
