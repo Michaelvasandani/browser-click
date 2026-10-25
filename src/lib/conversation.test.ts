@@ -1189,7 +1189,7 @@ describe('Conversation: scrolling to things on the page', () => {
 
   it('offers scroll_to and describes it only when acting on the page is on', async () => {
     const { pageTools, model, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: false, actOnPage: true });
-    expect(offeredNames(pageTools)).toEqual(['look', 'scroll_to', 'click']);
+    expect(offeredNames(pageTools)).toEqual(['look', 'scroll_to', 'click', 'type']);
     model.respond(response([text('ok')]));
     await conversation.ask('Where is it?');
     const system = String(model.lastRequest.system);
@@ -1199,7 +1199,7 @@ describe('Conversation: scrolling to things on the page', () => {
 
   it('describes both Marks and scrolling when both are on', async () => {
     const { pageTools, model, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: true, actOnPage: true });
-    expect(offeredNames(pageTools)).toEqual(['look', 'mark', 'scroll_to', 'click']);
+    expect(offeredNames(pageTools)).toEqual(['look', 'mark', 'scroll_to', 'click', 'type']);
     model.respond(response([text('ok')]));
     await conversation.ask('Where is it?');
     const system = String(model.lastRequest.system);
@@ -1823,5 +1823,306 @@ describe('Conversation: clicks that are never allowed', () => {
     lookThenClick(model, 'Our own embed');
     await conversation.ask('Open it.');
     expect(requests).toEqual([{ action: 'click', target: 'Our own embed', role: 'iframe' }]);
+  });
+});
+
+describe('Conversation: typing into fields, with Allow or Deny', () => {
+  /** A help centre with a search box, a filter list, and fields that must never be typed into. */
+  const FIELDS = `
+    <h1 data-rect="10,10,300,30">Help centre</h1>
+    <input id="search" type="search" aria-label="Search help" data-rect="10,60,200,30">
+    <textarea id="notes" aria-label="Notes" data-rect="10,100,200,60"></textarea>
+    <input id="code" aria-label="Short code" maxlength="4" data-rect="10,170,200,30">
+    <input id="password" type="password" aria-label="Password" data-rect="10,210,200,30">
+    <input id="card" aria-label="Card number" autocomplete="cc-number" data-rect="10,250,200,30">
+    <input id="expiry" aria-label="Expiry" autocomplete="billing cc-exp" data-rect="10,290,200,30">
+    <button id="go" data-rect="300,60,80,30">Go</button>
+    <iframe id="pay" title="Card payment" src="https://pay.other.test/form" data-rect="10,330,300,100"></iframe>`;
+
+  /** An approver that answers every request the same way, recording what it was asked. */
+  function scriptedApprover(answer: boolean) {
+    const requests: ApprovalRequest[] = [];
+    const approver: Approver = (request) => {
+      requests.push(request);
+      return Promise.resolve(answer);
+    };
+    return { approver, requests };
+  }
+
+  /**
+   * A field as React controls it: React keeps its own copy of the value
+   * (updated whenever the value is set through the element) and only hears an
+   * input event when the element's value differs from that copy. So setting
+   * `field.value` and dispatching input is not enough; the change must go
+   * through the native value setter.
+   */
+  function controlLikeReact(field: HTMLInputElement | HTMLTextAreaElement, onChange: (value: string) => void) {
+    const proto = Object.getPrototypeOf(field) as object;
+    const native = Object.getOwnPropertyDescriptor(proto, 'value')!;
+    let tracked = native.get!.call(field) as string;
+    Object.defineProperty(field, 'value', {
+      configurable: true,
+      get: () => native.get!.call(field),
+      set: (value: string) => {
+        tracked = String(value);
+        native.set!.call(field, value);
+      },
+    });
+    field.addEventListener('input', () => {
+      const value = native.get!.call(field) as string;
+      if (value === tracked) return;
+      tracked = value;
+      onChange(value);
+    });
+  }
+
+  function setupTyping(approver?: Approver, { actOnPage = true, body = FIELDS } = {}) {
+    const doc = pageDocument(body);
+    const inputs: string[] = [];
+    const changes: string[] = [];
+    const submits: string[] = [];
+    doc.addEventListener('input', (event) => inputs.push((event.target as Element).id));
+    doc.addEventListener('change', (event) => changes.push((event.target as Element).id));
+    doc.addEventListener('submit', (event) => {
+      submits.push((event.target as HTMLFormElement).id);
+      event.preventDefault();
+    });
+    const pageTools = createPageTools(doc, { drawOnPage: true, actOnPage });
+    const harness = setup({ pageTools, approver });
+    harness.conversation.addSelection(selection());
+    const field = (id: string) => doc.getElementById(id) as HTMLInputElement;
+    return { doc, field, inputs, changes, submits, pageTools, ...harness };
+  }
+
+  /** Scripts look, then typing each text into the element with this name, then a short answer. */
+  function lookThenType(model: FakeModel, name: string, ...texts: string[]) {
+    const look = pageToolCall('look');
+    const calls: ScriptedPageToolCall[] = [];
+    model.respond(async function* () {
+      yield look;
+      const element = refOf(await look.result, name);
+      for (const text of texts) {
+        const call = pageToolCall('type', { element, text });
+        calls.push(call);
+        yield call;
+        await call.result;
+      }
+      yield* response([text('Done.')]);
+    });
+    return calls;
+  }
+
+  it('offers type, taking an element reference and the text, and describes it only when acting on the page is on', async () => {
+    const on = setupTyping(undefined, { actOnPage: true });
+    const type = on.pageTools.offered.find((tool) => tool.name === 'type');
+    expect(type?.inputSchema).toMatchObject({ required: ['element', 'text'], additionalProperties: false });
+    expect(Object.keys(type!.inputSchema.properties).sort()).toEqual(['element', 'text']);
+    on.model.respond(response([text('ok')]));
+    await on.conversation.ask('Search for refunds.');
+    expect(String(on.model.lastRequest.system)).toMatch(/\btype into\b/);
+
+    const off = setupTyping(scriptedApprover(true).approver, { actOnPage: false });
+    expect(off.pageTools.offered.map((tool) => tool.name)).not.toContain('type');
+    const call = pageToolCall('type', { element: 'e1', text: 'refunds' });
+    off.model.respond([call, ...response([text('ok')])]);
+    await off.conversation.ask('Search for refunds.');
+    expect(String(off.model.lastRequest.system)).not.toMatch(/\btype into\b/);
+    expect(resultText(await call.result)).toMatch(/not available/);
+    expect(off.inputs).toEqual([]);
+  });
+
+  it('types only after Allow, showing the exact text and the field in the request, and says so', async () => {
+    const { approver, requests } = scriptedApprover(true);
+    const { model, events, field, conversation } = setupTyping(approver);
+    const calls = lookThenType(model, 'Search help', 'refund  for an order, "gift" card');
+    await conversation.ask('How do I get a refund?');
+    const [call] = calls;
+
+    expect(requests).toEqual([{ action: 'type', target: 'Search help', role: 'searchbox', text: 'refund  for an order, "gift" card' }]);
+    expect(field('search').value).toBe('refund  for an order, "gift" card');
+    const result = await call!.result;
+    expect(result.isError).toBeFalsy();
+    expect(resultText(result)).toMatch(/Typed .*into .*searchbox "Search help"/);
+    expect(events).toContainEqual({
+      type: 'page-action',
+      action: 'type',
+      target: 'Search help',
+      text: 'refund  for an order, "gift" card',
+      outcome: 'done',
+    });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('types the way a person would, so the page and React-controlled fields notice', async () => {
+    const { model, field, inputs, changes, conversation } = setupTyping(scriptedApprover(true).approver);
+    const seen: string[] = [];
+    field('search').value = 'old';
+    controlLikeReact(field('search'), (value) => seen.push(value));
+    lookThenType(model, 'Search help', 'refunds');
+    await conversation.ask('Search for refunds.');
+
+    expect(field('search').value).toBe('refunds');
+    expect(seen).toEqual(['refunds']);
+    expect(inputs).toEqual(['search']);
+    expect(changes).toEqual(['search']);
+  });
+
+  it('types into a textarea, keeping the text exactly, line breaks included', async () => {
+    const { approver, requests } = scriptedApprover(true);
+    const { model, field, conversation } = setupTyping(approver);
+    const seen: string[] = [];
+    controlLikeReact(field('notes'), (value) => seen.push(value));
+    lookThenType(model, 'Notes', 'line one\nline two');
+    await conversation.ask('Write it down.');
+
+    expect(requests).toMatchObject([{ action: 'type', target: 'Notes', text: 'line one\nline two' }]);
+    expect(field('notes').value).toBe('line one\nline two');
+    expect(seen).toEqual(['line one\nline two']);
+  });
+
+  it("doesn't type on Deny, tells the Assistant the user didn't allow it, and the answer carries on", async () => {
+    const { approver, requests } = scriptedApprover(false);
+    const { model, events, field, inputs, conversation } = setupTyping(approver);
+    const calls = lookThenType(model, 'Search help', 'cancel my account');
+    await conversation.ask('Cancel my account.');
+
+    expect(requests).toHaveLength(1);
+    expect(field('search').value).toBe('');
+    expect(inputs).toEqual([]);
+    const result = await calls[0]!.result;
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(/the user didn't allow this/i);
+    expect(events).toContainEqual({
+      type: 'page-action',
+      action: 'type',
+      target: 'Search help',
+      text: 'cancel my account',
+      outcome: 'denied',
+    });
+    expect(events.flatMap((e) => (e.type === 'text' ? [e.text] : [])).join('')).toBe('Done.');
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('asks again for different text in the same field: each text is its own Page Action', async () => {
+    const answers = [true, false];
+    const requests: ApprovalRequest[] = [];
+    const approver: Approver = (request) => {
+      requests.push(request);
+      return Promise.resolve(answers.shift()!);
+    };
+    const { model, events, field, conversation } = setupTyping(approver);
+    lookThenType(model, 'Search help', 'refunds', 'refunds and returns');
+    await conversation.ask('Search for refunds.');
+
+    expect(requests).toEqual([
+      { action: 'type', target: 'Search help', role: 'searchbox', text: 'refunds' },
+      { action: 'type', target: 'Search help', role: 'searchbox', text: 'refunds and returns' },
+    ]);
+    expect(field('search').value).toBe('refunds');
+    expect(events.filter((e) => e.type === 'page-action')).toEqual([
+      { type: 'page-action', action: 'type', target: 'Search help', text: 'refunds', outcome: 'done' },
+      { type: 'page-action', action: 'type', target: 'Search help', text: 'refunds and returns', outcome: 'denied' },
+    ]);
+  });
+
+  it('denies every typing when there is no approver to ask', async () => {
+    const { model, field, events, conversation } = setupTyping(undefined);
+    lookThenType(model, 'Search help', 'refunds');
+    await conversation.ask('Search for refunds.');
+    expect(field('search').value).toBe('');
+    expect(events).toContainEqual(expect.objectContaining({ type: 'page-action', action: 'type', outcome: 'denied' }));
+  });
+
+  it.each([
+    ['Password', /password/i],
+    ['Card number', /payment/i],
+    ['Expiry', /payment/i],
+  ])('refuses %s, before asking the user, and says why', async (name, reason) => {
+    const { approver, requests } = scriptedApprover(true);
+    const { model, events, inputs, conversation } = setupTyping(approver);
+    const calls = lookThenType(model, name, 'hunter2');
+    await conversation.ask('Fill it in for me.');
+
+    expect(requests).toEqual([]);
+    expect(inputs).toEqual([]);
+    const result = await calls[0]!.result;
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(reason);
+    expect(events).toContainEqual({ type: 'page-action', action: 'type', target: name, text: 'hunter2', outcome: 'refused' });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('refuses a field the page turns into a password field while the user decides', async () => {
+    const { model, field, events, conversation } = setupTyping(async () => {
+      field('search').type = 'password';
+      return true;
+    });
+    const calls = lookThenType(model, 'Search help', 'secret');
+    await conversation.ask('Search.');
+
+    expect(field('search').value).toBe('');
+    expect(resultText(await calls[0]!.result)).toMatch(/changed while the user decided: .*password/i);
+    expect(events).toContainEqual({ type: 'page-action', action: 'type', target: 'Search help', text: 'secret', outcome: 'refused' });
+  });
+
+  it('refuses content embedded from another site, reusing the click rules', async () => {
+    const { approver, requests } = scriptedApprover(true);
+    const { model, events, conversation } = setupTyping(approver);
+    const calls = lookThenType(model, 'Card payment', '4242');
+    await conversation.ask('Pay.');
+
+    expect(requests).toEqual([]);
+    expect(resultText(await calls[0]!.result)).toMatch(/another site/i);
+    expect(events).toContainEqual({ type: 'page-action', action: 'type', target: 'Card payment', text: '4242', outcome: 'refused' });
+  });
+
+  it("refuses a field inside browser-click's own Panel, even one the page moved there", async () => {
+    const { approver, requests } = scriptedApprover(true);
+    const { doc, model, field, conversation } = setupTyping(approver);
+    const look = pageToolCall('look');
+    const calls: ScriptedPageToolCall[] = [];
+    model.respond(async function* () {
+      yield look;
+      const element = refOf(await look.result, 'Search help');
+      doc.body.appendChild(doc.createElement('browser-click-panel')).appendChild(field('search'));
+      calls.push(pageToolCall('type', { element, text: 'hi' }));
+      yield calls[0]!;
+      yield* response([text('Done.')]);
+    });
+    await conversation.ask('Type hi.');
+
+    expect(requests).toEqual([]);
+    expect(field('search').value).toBe('');
+    expect(resultText(await calls[0]!.result)).toMatch(/browser-click's own/i);
+  });
+
+  it.each([
+    ['Go', 'refunds', /not a text field/i],
+    ['Search help', 'two\nlines', /one line/i],
+    ['Short code', 'ABCDE', /at most 4 characters/i],
+  ])('refuses typing into %s that would not hold %j exactly, without asking', async (name, typed, reason) => {
+    const { approver, requests } = scriptedApprover(true);
+    const { model, inputs, conversation } = setupTyping(approver);
+    const calls = lookThenType(model, name, typed);
+    await conversation.ask('Type it.');
+
+    expect(requests).toEqual([]);
+    expect(inputs).toEqual([]);
+    expect(resultText(await calls[0]!.result)).toMatch(reason);
+  });
+
+  it('stops a form the page submits from its own input handler, and says so', async () => {
+    const body = '<form id="find" action="/search"><input id="q" aria-label="Find" data-rect="10,10,200,30"></form>';
+    const { doc, model, submits, events, conversation } = setupTyping(scriptedApprover(true).approver, { body });
+    const sent: string[] = [];
+    doc.getElementById('find')!.addEventListener('submit', () => sent.push('find'));
+    doc.getElementById('q')!.addEventListener('input', () => (doc.getElementById('find') as HTMLFormElement).requestSubmit());
+    const calls = lookThenType(model, 'Find', 'refunds');
+    await conversation.ask('Search.');
+
+    expect(sent).toEqual([]);
+    expect(submits).toEqual([]);
+    expect(resultText(await calls[0]!.result)).toMatch(/submit a form/i);
+    expect(events).toContainEqual({ type: 'page-action', action: 'type', target: 'Find', text: 'refunds', outcome: 'refused' });
   });
 });

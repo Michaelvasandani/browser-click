@@ -184,15 +184,46 @@ function MarkStep({ step }: { step: Extract<PageStep, { kind: 'mark' }> }) {
 const PAGE_ACTION_WORDS: Record<PageActionKind, Record<PageActionOutcome, string>> = {
   scroll: { done: 'Scrolled to', refused: "Didn't scroll to", denied: "Didn't scroll to" },
   click: { done: 'Clicked', refused: "Didn't click", denied: "Didn't click" },
+  type: { done: 'Typed', refused: "Didn't type", denied: "Didn't type" },
 };
 
-/** What the Allow prompt asks, naming the element: "Click the button Settings?" */
-function approvalWords(request: ApprovalRequest) {
+/** One Page Action line: "Clicked *Settings*", or "Typed *refunds* into *Search help*". */
+function PageActionStep({ step }: { step: Extract<PageStep, { kind: 'page-action' }> }) {
+  const words = PAGE_ACTION_WORDS[step.action][step.outcome];
+  if (step.action === 'type' && step.text !== undefined) {
+    return (
+      <>
+        {words} <em className="typed-text">{step.text}</em> into <em>{step.target}</em>
+      </>
+    );
+  }
   return (
     <>
-      Click the {request.role} <em>{request.target}</em>?
+      {words} <em>{step.target}</em>
     </>
   );
+}
+
+/**
+ * What the Allow prompt asks, naming the element: "Click the button Settings?",
+ * or, with the exact text that will be typed (never shortened), "Type *refunds*
+ * into the searchbox Search help?"
+ */
+function approvalWords(request: ApprovalRequest) {
+  switch (request.action) {
+    case 'click':
+      return (
+        <>
+          Click the {request.role} <em>{request.target}</em>?
+        </>
+      );
+    case 'type':
+      return (
+        <>
+          Type <span className="typed-text">{request.text}</span> into the {request.role} <em>{request.target}</em>?
+        </>
+      );
+  }
 }
 
 function Approval({ request, onAllow, onDeny }: { request: ApprovalRequest; onAllow: () => void; onDeny: () => void }) {
@@ -240,9 +271,7 @@ const Turn = memo(function Turn({
           {step.kind === 'mark' ? (
             <MarkStep step={step} />
           ) : (
-            <>
-              {PAGE_ACTION_WORDS[step.action][step.outcome]} <em>{step.target}</em>
-            </>
+            <PageActionStep step={step} />
           )}
         </p>
       ))}

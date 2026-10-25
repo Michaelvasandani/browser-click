@@ -22,7 +22,8 @@ export type PageStep =
       /** A label's number. */
       number?: number;
     }
-  | { kind: 'page-action'; action: PageActionKind; target: string; outcome: PageActionOutcome };
+  /** `text` is what typing put, or would have put, in the field. */
+  | { kind: 'page-action'; action: PageActionKind; target: string; text?: string; outcome: PageActionOutcome };
 
 export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'stopped' | 'error' | 'refused';
 
@@ -219,8 +220,8 @@ export class PanelStore {
       }
       case 'page-action': {
         const turn = this.state.turns.at(-1);
-        const { action, target, outcome } = event;
-        if (turn) this.updateLastTurn({ steps: [...turn.steps, { kind: 'page-action', action, target, outcome }] });
+        const { action, target, text, outcome } = event;
+        if (turn) this.updateLastTurn({ steps: [...turn.steps, { kind: 'page-action', action, target, text, outcome }] });
         break;
       }
       case 'marks-cleared':

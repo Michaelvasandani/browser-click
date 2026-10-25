@@ -258,6 +258,21 @@
   font-weight: 600;
 }
 
+/*
+ * Text the Assistant types, shown exactly: every space and line break kept,
+ * long words wrapped rather than cut, never shortened.
+ */
+.typed-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95em;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--subtle);
+  border: 1px solid var(--border);
+}
+
 .approval-actions {
   display: flex;
   gap: 8px;

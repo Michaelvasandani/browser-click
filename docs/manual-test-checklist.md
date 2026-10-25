@@ -132,3 +132,13 @@ Use a settings page with toggles and buttons (for example GitHub's notification 
 - [ ] Ask Claude to follow a link to another site, or one that opens a new tab. No prompt appears, the page stays, and the answer shows "Didn't click *…*". An in-page link (`#section`) and a link in a single-page app (for example GitHub's repository tabs) are clicked after **Allow**.
 - [ ] On a page with a cross-origin iframe (for example an embedded YouTube video or a card form), Claude can't click the frame: no prompt, "Didn't click *…*".
 - [ ] "Leave site?" on navigation by script: on a test page with `<button onclick="setTimeout(() => location.href='https://example.org', 50)">Continue</button>` (save it as `leave.html` and serve it with `python3 -m http.server`, then open `http://localhost:8000/leave.html`), ask Claude to click Continue and **Allow**. Chrome shows its "Leave site?" dialog; **Cancel** keeps the page and the Panel. Clicking the same button yourself afterwards navigates with no dialog. (Chrome shows the dialog only after a real click in the page; the **Allow** click counts.)
+
+## Typing (Claude Code, "Act on the page" on)
+
+- [ ] On a help centre or docs site with a search box (for example a React site such as react.dev, whose search is a controlled field), ask "search this site for refunds". The Allow / Deny prompt shows the exact text and names the field ("Type `refunds` into the searchbox *Search*?"), and nothing is typed until **Allow**.
+- [ ] After **Allow**, the text appears in the field and the page reacts to it (results filter or suggestions appear, as when you type yourself), and the answer shows "Typed *refunds* into *Search*". Nothing presses Enter or submits the search.
+- [ ] Ask for text with double spaces, quotes and a long word: the prompt shows it exactly, wrapped, not shortened, and the field ends up holding exactly that.
+- [ ] After **Deny**, the field is unchanged and the answer shows "Didn't type *…* into *…*".
+- [ ] Ask Claude to change what it typed ("search for returns instead"): a new prompt appears for the new text.
+- [ ] On a sign-in page, ask Claude to fill in the password, and on a checkout page the card number: no prompt appears, nothing is typed, and the answer shows "Didn't type *…* into *…*" with Claude saying you must type it yourself.
+- [ ] On a page with a card form in a cross-origin iframe (for example a Stripe checkout demo), Claude can't type into it: no prompt, "Didn't type *…*".

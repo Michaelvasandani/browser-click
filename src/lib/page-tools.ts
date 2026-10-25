@@ -11,7 +11,7 @@ import { MARK_KINDS, MarksLayer, type MarkAnchor, type MarkKind, type ViewportRe
  * left to the model.
  */
 
-export type PageToolName = 'look' | 'mark' | 'scroll_to' | 'click';
+export type PageToolName = 'look' | 'mark' | 'scroll_to' | 'click' | 'type';
 
 export interface PageToolDefinition {
   name: PageToolName;
@@ -33,7 +33,7 @@ export interface PageToolResult {
 }
 
 /** The kinds of Page Action. */
-export type PageActionKind = 'scroll' | 'click';
+export type PageActionKind = 'scroll' | 'click' | 'type';
 
 /**
  * How a Page Action ended: carried out, refused by the page tools' rules, or
@@ -45,12 +45,21 @@ export type PageActionOutcome = 'done' | 'refused' | 'denied';
  * A Page Action waiting for the user's Allow, as the Panel shows it. The page
  * tools ask only after their own rules let the step through.
  */
-export interface ApprovalRequest {
-  action: 'click';
-  /** The element's name, as the reader would say it (or its role, if it has no name). */
-  target: string;
-  role: string;
-}
+export type ApprovalRequest =
+  | {
+      action: 'click';
+      /** The element's name, as the reader would say it (or its role, if it has no name). */
+      target: string;
+      role: string;
+    }
+  | {
+      action: 'type';
+      /** The field's name, as the reader would say it (or its role, if it has no name). */
+      target: string;
+      role: string;
+      /** Exactly the text that will be typed, never shortened. */
+      text: string;
+    };
 
 /** An image in a page tool result, in MCP's shape. Only look returns one. */
 export interface PageToolImage {
@@ -75,8 +84,12 @@ export const MAX_IMAGE_DATA_CHARS = 700_000;
 /** Something a page tool call did that the Panel shows as a line in the answer. */
 export type PageToolEffect =
   | MarkEffect
-  /** `target` names the element as the reader would: its name, or what the Assistant asked for when refused. */
-  | { type: 'page-action'; action: PageActionKind; target: string; outcome: PageActionOutcome };
+  /**
+   * `target` names the element as the reader would: its name, or what the
+   * Assistant asked for when refused. `text` is what typing put (or would have
+   * put) in the field.
+   */
+  | { type: 'page-action'; action: PageActionKind; target: string; text?: string; outcome: PageActionOutcome };
 
 /**
  * A Mark was drawn. `target` names the element it points at (absent for an
@@ -176,7 +189,22 @@ const CLICK: PageToolDefinition = {
   },
 };
 
-/** How long a click is given to change the page before the elements in view are listed. */
+const TYPE: PageToolDefinition = {
+  name: 'type',
+  description:
+    "Type text into a field in view, such as a search or filter box, when that is the obvious next step for what the reader asked. Takes an element reference from the latest look and the exact text; the text replaces what the field holds. Each typing waits for the reader to allow that exact text, and they may say no: if so, carry on without it. Typing never presses Enter or submits anything. Password and payment fields are always refused, as are fields in content embedded from other sites. Returns the elements in view afterwards.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      element: { type: 'string', description: 'An element reference from look, such as e3.' },
+      text: { type: 'string', description: 'The exact text to put in the field.' },
+    },
+    required: ['element', 'text'],
+    additionalProperties: false,
+  },
+};
+
+/** How long a click or typing is given to change the page before the elements in view are listed. */
 const CLICK_SETTLE_MS = 150;
 
 /** The page tools the Assistant is given under these settings. */
@@ -184,7 +212,7 @@ export function offeredPageTools(settings: PageToolSettings): PageToolDefinition
   const tools: PageToolDefinition[] = [];
   if (settings.drawOnPage || settings.actOnPage) tools.push(LOOK);
   if (settings.drawOnPage) tools.push(MARK);
-  if (settings.actOnPage) tools.push(SCROLL_TO, CLICK);
+  if (settings.actOnPage) tools.push(SCROLL_TO, CLICK, TYPE);
   return tools;
 }
 
@@ -254,12 +282,12 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
     target: string,
     outcome: PageActionOutcome,
     summary: string,
+    typed?: string,
   ): PageToolOutcome => {
     const text = `${summary}\n\n${describeVisible(doc, refs)}`;
-    return {
-      result: outcome === 'done' ? ok(text) : refused(text),
-      effect: { type: 'page-action', action, target, outcome },
-    };
+    const effect: Extract<PageToolEffect, { type: 'page-action' }> = { type: 'page-action', action, target, outcome };
+    if (typed !== undefined) effect.text = typed;
+    return { result: outcome === 'done' ? ok(text) : refused(text), effect };
   };
 
   /** An image of the visible page, without browser-click's Marks, or why there is none. */
@@ -350,6 +378,30 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
       });
       if (stopped) return pageAction('click', target, 'refused', `Clicked ${described}, but ${stopped}`);
       return pageAction('click', target, 'done', `Clicked ${described}.`);
+    },
+    type: async (input, context) => {
+      const typed = typeof input.text === 'string' ? input.text : undefined;
+      const found = typeTarget(doc, refs, input);
+      if ('refusal' in found) return pageAction('type', found.asked, 'refused', found.refusal, typed);
+      const { field, text } = found;
+      const target = nameOf(field) || roleOf(field);
+      const described = `${refs.ref(field)} (${describeElement(field)})`;
+      const quoted = JSON.stringify(text);
+      const allowed = (await context.approve?.({ action: 'type', target, role: roleOf(field), text })) ?? false;
+      if (!allowed) {
+        return pageAction('type', target, 'denied', `The user didn't allow this: nothing was typed into ${described}. Carry on without it.`, text);
+      }
+      // The page may have changed while the user decided.
+      if (!field.isConnected) return pageAction('type', target, 'refused', `${described} is no longer on the page.`, text);
+      const still = typeTarget(doc, refs, { element: refs.ref(field), text });
+      if ('refusal' in still) return pageAction('type', target, 'refused', `It changed while the user decided: ${still.refusal}`, text);
+      const stopped = await whileActing(doc, async () => {
+        typeInto(field, text);
+        await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+      });
+      if (stopped) return pageAction('type', target, 'refused', `Typed ${quoted} into ${described}, but ${stopped}`, text);
+      const shown = field.value === text ? '' : ` The page changed it: the field now holds ${JSON.stringify(field.value)}.`;
+      return pageAction('type', target, 'done', `Typed ${quoted} into ${described}.${shown}`, text);
     },
   };
 
@@ -478,6 +530,84 @@ function clickTarget(doc: Document, refs: Refs, input: Record<string, unknown>):
     return { asked: nameOf(element) || roleOf(element), refusal: `${refs.ref(element)} (${describeElement(element)}) ${never}` };
   }
   return { element };
+}
+
+type TextField = HTMLInputElement | HTMLTextAreaElement;
+
+/** Input types that take free text as it is typed. Others (number, date, ...) would change or reject it. */
+const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel']);
+
+/**
+ * The field a type call asks for and the text to put in it, or why it is
+ * refused: a text field the Assistant looked up, still listed and in view,
+ * never a password or payment field, that will hold exactly this text. The
+ * rules run before the user is asked.
+ */
+function typeTarget(
+  doc: Document,
+  refs: Refs,
+  input: Record<string, unknown>,
+): { field: TextField; text: string } | { refusal: string; asked: string } {
+  const asked = typeof input.element === 'string' ? input.element : 'nothing';
+  const element = refs.element(input.element);
+  if (!element) return { asked, refusal: unknownElement(input.element) };
+  const name = nameOf(element) || roleOf(element);
+  const described = `${refs.ref(element)} (${describeElement(element)})`;
+  const outOfReach = offLimits(doc, element);
+  if (outOfReach) return { asked: name, refusal: `${refs.ref(element)} ${outOfReach}` };
+  if (!isListed(element)) return { asked, refusal: unknownElement(input.element) };
+  const view = doc.defaultView!;
+  if (!inView(element, { width: view.innerWidth, height: view.innerHeight })) {
+    return { asked, refusal: `${described} is not in view. Only fields in view can be typed into.` };
+  }
+  const never = neverTyped(element);
+  if (never) return { asked: name, refusal: `${described} ${never}` };
+  const isTextarea = element.tagName === 'TEXTAREA';
+  if (!isTextarea && !(element.tagName === 'INPUT' && TEXT_INPUT_TYPES.has((element as HTMLInputElement).type))) {
+    return { asked: name, refusal: `${described} is not a text field. type only fills in text fields, such as a search box.` };
+  }
+  const field = element as TextField;
+  if (field.disabled || field.readOnly) return { asked: name, refusal: `${described} can't be changed right now (it is disabled or read-only).` };
+  if (typeof input.text !== 'string') return { asked: name, refusal: 'Give type the exact text to put in the field.' };
+  const text = input.text;
+  // The field must end up holding exactly the text the user allowed.
+  if (!isTextarea && /[\r\n]/.test(text)) {
+    return { asked: name, refusal: `${described} holds one line only, and the text has line breaks. Give it one line.` };
+  }
+  if (field.maxLength >= 0 && text.length > field.maxLength) {
+    return { asked: name, refusal: `${described} holds at most ${field.maxLength} characters, and the text has ${text.length}.` };
+  }
+  return { field, text };
+}
+
+/**
+ * Why typing into this element is never allowed, Allow or not: password
+ * fields and payment fields, by input type or by autocomplete hint.
+ */
+function neverTyped(element: Element): string | undefined {
+  const hints = (element.getAttribute('autocomplete') ?? '').toLowerCase().split(/\s+/);
+  if ((element as HTMLInputElement).type === 'password' || hints.includes('current-password') || hints.includes('new-password')) {
+    return 'is a password field. browser-click never types passwords; the reader must type it themselves.';
+  }
+  if (hints.some((hint) => hint.startsWith('cc-'))) {
+    return 'is a payment card field. browser-click never types payment details; the reader must type them themselves.';
+  }
+  return undefined;
+}
+
+/**
+ * Puts the text in the field as typing would, so the page notices: focus, the
+ * value set through the element's native setter (React-controlled fields
+ * track values set any other way, and then ignore the input event), then
+ * input and change events. Nothing presses Enter.
+ */
+function typeInto(field: TextField, text: string) {
+  const view = field.ownerDocument.defaultView!;
+  field.focus({ preventScroll: true });
+  const proto = field.tagName === 'TEXTAREA' ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(field, text);
+  field.dispatchEvent(new view.InputEvent('input', { bubbles: true, inputType: 'insertReplacementText', data: text }));
+  field.dispatchEvent(new view.Event('change', { bubbles: true }));
 }
 
 /**
