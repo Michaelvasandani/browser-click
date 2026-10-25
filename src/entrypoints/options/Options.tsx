@@ -177,6 +177,25 @@ export function Options() {
           </label>
         </section>
 
+        <section>
+          <span className="label">On the page</span>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.drawOnPage}
+              onChange={(e) => update({ drawOnPage: e.target.checked })}
+            />
+            <span>
+              <strong>Draw on the page</strong>
+              <small className="hint">
+                Claude can draw a box around the part of the page it is telling you about, so you don't have to find
+                it yourself. Drawing changes nothing on the page, and the boxes go away with your next question.
+                Works with Claude Code only for now.
+              </small>
+            </span>
+          </label>
+        </section>
+
         <div className="actions">
           <button type="submit">Save</button>
           {saved && (

@@ -17,6 +17,8 @@ export interface Settings {
   model: ModelId;
   /** Let the Assistant search the web (billed per search). */
   webSearch: boolean;
+  /** Let the Assistant draw Marks over the page (Claude Code backend only). */
+  drawOnPage: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -24,6 +26,7 @@ export const DEFAULT_SETTINGS: Settings = {
   apiKey: '',
   model: 'claude-opus-5-5',
   webSearch: true,
+  drawOnPage: true,
 };
 
 /** The subset of a chrome.storage area that settings need. */
@@ -41,6 +44,7 @@ export async function loadSettings(storage: SettingsStorage): Promise<Settings> 
     apiKey: typeof stored.apiKey === 'string' ? stored.apiKey : DEFAULT_SETTINGS.apiKey,
     model: MODELS.some((m) => m.id === stored.model) ? (stored.model as ModelId) : DEFAULT_SETTINGS.model,
     webSearch: typeof stored.webSearch === 'boolean' ? stored.webSearch : DEFAULT_SETTINGS.webSearch,
+    drawOnPage: typeof stored.drawOnPage === 'boolean' ? stored.drawOnPage : DEFAULT_SETTINGS.drawOnPage,
   };
 }
 

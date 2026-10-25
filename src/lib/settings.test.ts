@@ -53,6 +53,14 @@ describe('settings', () => {
     expect((await loadSettings(storage)).webSearch).toBe(false);
   });
 
+  it('lets the Assistant draw on the page by default and remembers when that is turned off', async () => {
+    expect(DEFAULT_SETTINGS.drawOnPage).toBe(true);
+    const storage = fakeStorage();
+    await saveSettings(storage, { drawOnPage: false });
+    expect((await loadSettings(storage)).drawOnPage).toBe(false);
+    expect((await loadSettings(fakeStorage({ drawOnPage: 'yes' }))).drawOnPage).toBe(true);
+  });
+
   it('falls back to the default model when the stored one is no longer offered', async () => {
     const storage = fakeStorage({ model: 'claude-retired-1' });
     expect((await loadSettings(storage)).model).toBe('claude-opus-5-5');
