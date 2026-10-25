@@ -102,3 +102,13 @@ The in-browser flow is checked by hand before a release. Unit tests (`npm test`)
 - [ ] On a long settings page, select the top and ask where to change something far below. The page scrolls to it without asking, and the answer shows "Scrolled to *Billing*" (or similar).
 - [ ] Asking for something that isn't on the page doesn't move the page; if Claude tried, the answer shows "Didn't scroll to *…*".
 - [ ] With "Act on the page" off, the page never scrolls and no scroll lines appear.
+
+## Clicking (Claude Code, "Act on the page" on)
+
+- [ ] Ask "open the settings" on a page with a Settings button in view. The answer shows an Allow / Deny prompt naming the button ("Click the button *Settings*?"), and nothing is clicked until **Allow**.
+- [ ] After **Allow**, the button is clicked, the answer shows "Clicked *Settings*", and Claude can carry on from what appeared (for example, point at an option in the opened menu).
+- [ ] After **Deny**, nothing is clicked, the answer shows "Didn't click *…*" and Claude carries on without it.
+- [ ] With the prompt showing, typing a new question and pressing `Enter` denies the click, stops that answer and answers the new question.
+- [ ] With the prompt showing, **Stop** denies the click and stops the answer. Leaving the prompt alone never clicks.
+- [ ] With the prompt showing, closing the Panel ends Claude Code cleanly (no stuck `claude` process in Activity Monitor).
+- [ ] With "Act on the page" off, Claude never offers to click.

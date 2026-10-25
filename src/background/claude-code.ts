@@ -74,18 +74,47 @@ export class ClaudeCodeTurns {
     this.stopReason = 'end_turn';
   }
 
-  /** The user stopped the answer. Returns true if claude should be interrupted. */
-  stop(): boolean {
-    if (!this.active) return false;
-    this.active = false;
-    this.stoppedPending++;
-    return true;
+  /**
+   * The user stopped the answer. Returns the messages for the host: an
+   * interrupt if an answer is running, and an error result for every page tool
+   * call still waiting, so claude never waits for one forever.
+   */
+  stop(): HostRequest[] {
+    const interrupt: HostRequest[] = [];
+    if (this.active) {
+      this.active = false;
+      this.stoppedPending++;
+      interrupt.push({ type: 'stop' });
+    }
+    return [...interrupt, ...this.abandonCalls(STOPPED_CALL)];
   }
 
-  /** claude called a page tool. Returns the messages for the page. */
-  pageToolCall(call: HostPageToolCall): ClaudeCodePortMessage[] {
+  /** The page's port closed. Returns an error result for every page tool call still waiting. */
+  close(): HostRequest[] {
+    return this.abandonCalls(CLOSED_CALL);
+  }
+
+  /**
+   * claude called a page tool. It goes to the page while an answer is running
+   * for it; otherwise nothing there would answer, so it fails at once.
+   */
+  pageToolCall(call: HostPageToolCall): { toPage: ClaudeCodePortMessage[]; toHost: HostRequest[] } {
+    if (!this.active || this.stoppedPending > 0) {
+      return { toPage: [], toHost: [{ type: 'page-tool-result', callId: call.callId, result: errorResult(STOPPED_CALL) }] };
+    }
     this.pendingCalls.add(call.callId);
-    return [{ type: 'page-tool-call', callId: call.callId, call: { name: call.name, input: call.input } }];
+    return {
+      toPage: [{ type: 'page-tool-call', callId: call.callId, call: { name: call.name, input: call.input } }],
+      toHost: [],
+    };
+  }
+
+  private abandonCalls(why: string): HostRequest[] {
+    const requests = [...this.pendingCalls].map(
+      (callId): HostRequest => ({ type: 'page-tool-result', callId, result: errorResult(why) }),
+    );
+    this.pendingCalls.clear();
+    return requests;
   }
 
   /** The page answered a page tool call. Returns the messages for the host. */
@@ -123,6 +152,8 @@ export class ClaudeCodeTurns {
   /** claude exited (or the host went away). Fails the answer in progress, if any. */
   exit(reason: string): ModelPortMessage[] {
     this.stoppedPending = 0;
+    // Whatever was waiting for them went with claude.
+    this.pendingCalls.clear();
     if (!this.active) return [];
     this.active = false;
     return [{ type: 'error', ...classifyClaudeCodeError(reason) }];
@@ -167,6 +198,11 @@ export class ClaudeCodeTurns {
     } as Anthropic.Message;
   }
 }
+
+const STOPPED_CALL = 'The reader stopped this answer, so this step did not happen.';
+const CLOSED_CALL = 'The browser-click panel was closed or the page went away, so this step did not happen.';
+
+const errorResult = (text: string): PageToolResult => ({ content: [{ type: 'text', text }], isError: true });
 
 /** Sorts Claude Code's error text into the cases the Panel can explain. */
 export function classifyClaudeCodeError(message: string): { kind: ModelErrorKind; message: string } {
@@ -217,7 +253,9 @@ function serve(port: Browser.runtime.Port) {
         post({ type: 'session', sessionId });
       } else if (message.type === 'page-tool-call') {
         const { callId, name, input } = message;
-        turns.pageToolCall({ callId, name, input }).forEach(post);
+        const { toPage, toHost: answers } = turns.pageToolCall({ callId, name, input });
+        toPage.forEach(post);
+        answers.forEach(toHost);
       } else if (message.type === 'output') {
         if (message.output.type === 'system' && message.output.subtype === 'init') resumable = true;
         turns.output(message.output).forEach(post);
@@ -261,7 +299,7 @@ function serve(port: Browser.runtime.Port) {
       turns.ask();
       toHost({ type: 'ask', content: request.content });
     } else if (request.type === 'stop') {
-      if (turns.stop()) toHost({ type: 'stop' });
+      turns.stop().forEach(toHost);
     } else if (request.type === 'page-tool-result') {
       turns.pageToolResult(request.callId, request.result).forEach(toHost);
     }
@@ -270,6 +308,7 @@ function serve(port: Browser.runtime.Port) {
   port.onDisconnect.addListener(() => {
     // The Panel closed or the page went away: end the claude process with it.
     closed = true;
+    turns.close().forEach(toHost);
     host?.disconnect();
     host = null;
   });

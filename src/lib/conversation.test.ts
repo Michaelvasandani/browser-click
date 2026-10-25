@@ -4,13 +4,14 @@ import {
   Conversation,
   EXPLAIN_QUESTION,
   ModelError,
+  type Approver,
   type ConversationEvent,
   type ModelStreamItem,
   type SelectionInput,
 } from './conversation';
 import type { PageContext } from './page-context';
 import type { CaptureResponse } from './messages';
-import { createPageTools, offeredPageTools, type CaptureVisiblePage } from './page-tools';
+import { createPageTools, offeredPageTools, type ApprovalRequest, type CaptureVisiblePage } from './page-tools';
 import {
   contentOf,
   FakeModel,
@@ -958,7 +959,7 @@ describe('Conversation: scrolling to things on the page', () => {
 
   it('offers scroll_to and describes it only when acting on the page is on', async () => {
     const { pageTools, model, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: false, actOnPage: true });
-    expect(offeredNames(pageTools)).toEqual(['look', 'scroll_to']);
+    expect(offeredNames(pageTools)).toEqual(['look', 'scroll_to', 'click']);
     model.respond(response([text('ok')]));
     await conversation.ask('Where is it?');
     const system = String(model.lastRequest.system);
@@ -968,7 +969,7 @@ describe('Conversation: scrolling to things on the page', () => {
 
   it('describes both Marks and scrolling when both are on', async () => {
     const { pageTools, model, conversation } = setupOnPage(LONG_PAGE, { drawOnPage: true, actOnPage: true });
-    expect(offeredNames(pageTools)).toEqual(['look', 'mark', 'scroll_to']);
+    expect(offeredNames(pageTools)).toEqual(['look', 'mark', 'scroll_to', 'click']);
     model.respond(response([text('ok')]));
     await conversation.ask('Where is it?');
     const system = String(model.lastRequest.system);
@@ -1128,5 +1129,195 @@ describe('Conversation: looking at the page as an image', () => {
     expect(await look.result).toMatchObject({ isError: true });
     expect(resultText(await look.result)).toMatch(/image/i);
     expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+});
+
+describe('Conversation: clicking, with Allow or Deny', () => {
+  /** A settings page whose Settings button opens a panel of options. */
+  const PAGE = `
+    <h1 data-rect="10,10,300,30">Account</h1>
+    <button id="settings" data-rect="10,60,80,30">Settings</button>
+    <button id="delete" data-rect="10,100,80,30">Delete</button>
+    <div id="options" hidden><button data-rect="10,140,120,30">Change password</button></div>`;
+
+  /** An approver that answers every request the same way, recording what it was asked. */
+  function scriptedApprover(answer: boolean | 'wait') {
+    const requests: ApprovalRequest[] = [];
+    const signals: AbortSignal[] = [];
+    const approver: Approver = (request, signal) => {
+      requests.push(request);
+      signals.push(signal);
+      return answer === 'wait' ? new Promise<boolean>(() => {}) : Promise.resolve(answer);
+    };
+    return { approver, requests, signals };
+  }
+
+  function setupClicking(approver?: Approver, { actOnPage = true } = {}) {
+    const doc = pageDocument(PAGE);
+    const clicks: string[] = [];
+    doc.querySelectorAll('button').forEach((button) => button.addEventListener('click', () => clicks.push(button.id)));
+    doc.getElementById('settings')!.addEventListener('click', () => doc.getElementById('options')!.removeAttribute('hidden'));
+    const pageTools = createPageTools(doc, { drawOnPage: true, actOnPage });
+    return { doc, clicks, pageTools, ...setup({ pageTools, approver }) };
+  }
+
+  /** Scripts look, then a click on the element with this name, then a short answer. */
+  function lookThenClick(model: FakeModel, name: string) {
+    const look = pageToolCall('look');
+    const click: { call?: ScriptedPageToolCall } = {};
+    model.respond(async function* () {
+      yield look;
+      click.call = pageToolCall('click', { element: refOf(await look.result, name) });
+      yield click.call;
+      yield* response([text('Done.')]);
+    });
+    return click;
+  }
+
+  it('clicks only after Allow, naming the element in the request, and says so', async () => {
+    const { approver, requests } = scriptedApprover(true);
+    const { model, events, clicks, conversation } = setupClicking(approver);
+    conversation.addSelection(selection());
+    const click = lookThenClick(model, 'Settings');
+    await conversation.ask('Where are the settings?');
+
+    expect(requests).toEqual([{ action: 'click', target: 'Settings', role: 'button' }]);
+    expect(clicks).toEqual(['settings']);
+    const result = await click.call!.result;
+    expect(result.isError).toBeFalsy();
+    expect(resultText(result)).toMatch(/Clicked .*button "Settings"/);
+    expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Settings', outcome: 'done' });
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('returns the elements in view after the click, so the Assistant can work in steps', async () => {
+    const { model, conversation } = setupClicking(scriptedApprover(true).approver);
+    conversation.addSelection(selection());
+    const click = lookThenClick(model, 'Settings');
+    await conversation.ask('How do I change my password?');
+
+    const after = resultText(await click.call!.result);
+    expect(after).toMatch(/viewport: 1024x768/i);
+    expect(after).toMatch(/button "Change password"/);
+    expect(refOf(await click.call!.result, 'Change password')).toMatch(/^e\d+$/);
+  });
+
+  it("doesn't click on Deny, tells the Assistant the user didn't allow it, and the answer carries on", async () => {
+    const { approver, requests } = scriptedApprover(false);
+    const { model, events, clicks, conversation } = setupClicking(approver);
+    conversation.addSelection(selection());
+    const click = lookThenClick(model, 'Delete');
+    await conversation.ask('Delete my account.');
+
+    expect(requests).toHaveLength(1);
+    expect(clicks).toEqual([]);
+    const result = await click.call!.result;
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toMatch(/the user didn't allow this/i);
+    expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Delete', outcome: 'denied' });
+    expect(events.flatMap((e) => (e.type === 'text' ? [e.text] : [])).join('')).toBe('Done.');
+    expect(events.at(-1)).toEqual({ type: 'done' });
+  });
+
+  it('denies a click waiting for approval when the answer is stopped; waiting never approves', async () => {
+    const { approver, signals } = scriptedApprover('wait');
+    const { model, events, clicks, conversation } = setupClicking(approver);
+    conversation.addSelection(selection());
+    const click = lookThenClick(model, 'Settings');
+    const asking = conversation.ask('Open settings.');
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(clicks).toEqual([]);
+
+    conversation.stop();
+    await asking;
+
+    expect(signals[0]!.aborted).toBe(true);
+    expect(clicks).toEqual([]);
+    expect(resultText(await click.call!.result)).toMatch(/the user didn't allow this/i);
+    expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Settings', outcome: 'denied' });
+    expect(events.at(-1)).toEqual({ type: 'stopped' });
+  });
+
+  it('denies a click waiting for approval when the user sends a new question, then answers that question', async () => {
+    const { approver, signals } = scriptedApprover('wait');
+    const { model, events, clicks, conversation } = setupClicking(approver);
+    conversation.addSelection(selection());
+    const click = lookThenClick(model, 'Delete');
+    const first = conversation.ask('Delete my account.');
+    await vi.waitFor(() => expect(conversation.awaitingApproval).toBe(true));
+
+    model.respond(response([text('Settings is at the top.')]));
+    await conversation.ask('Actually, where are the settings?');
+    await first;
+
+    expect(signals[0]!.aborted).toBe(true);
+    expect(clicks).toEqual([]);
+    expect(resultText(await click.call!.result)).toMatch(/the user didn't allow this/i);
+    expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Delete', outcome: 'denied' });
+    const types = events.map((e) => e.type);
+    expect(types.indexOf('stopped')).toBeLessThan(types.lastIndexOf('turn-started'));
+    expect(events.at(-1)).toEqual({ type: 'done' });
+    expect(contentOf(model.lastRequest, -1).at(-1)).toEqual({ type: 'text', text: 'Actually, where are the settings?' });
+    expect(conversation.awaitingApproval).toBe(false);
+  });
+
+  it('still refuses a second question while an answer is generating with no approval waiting', async () => {
+    const { model, conversation } = setup();
+    model.respond(hangingResponse('Partial'));
+    conversation.addSelection(selection());
+    const asking = conversation.ask('First?');
+    await vi.waitFor(() => expect(conversation.busy).toBe(true));
+    await expect(conversation.ask('Second?')).rejects.toThrow(/already/);
+    conversation.stop();
+    await asking;
+  });
+
+  it('denies every click when there is no approver to ask', async () => {
+    const { model, events, clicks, conversation } = setupClicking(undefined);
+    conversation.addSelection(selection());
+    const click = lookThenClick(model, 'Settings');
+    await conversation.ask('Open settings.');
+
+    expect(clicks).toEqual([]);
+    expect((await click.call!.result).isError).toBe(true);
+    expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'Settings', outcome: 'denied' });
+  });
+
+  it('refuses an element out of view or never looked up, without asking', async () => {
+    const { approver, requests } = scriptedApprover(true);
+    const { model, events, clicks, conversation } = setupClicking(approver);
+    conversation.addSelection(selection());
+    const unknown = pageToolCall('click', { element: 'e42' });
+    const byPosition = pageToolCall('click', { x: 40, y: 75 });
+    model.respond([unknown, byPosition, ...response([text('ok')])]);
+    await conversation.ask('Click it.');
+
+    expect(requests).toEqual([]);
+    expect(clicks).toEqual([]);
+    expect(resultText(await unknown.result)).toMatch(/look/);
+    expect((await byPosition.result).isError).toBe(true);
+    expect(events).toContainEqual({ type: 'page-action', action: 'click', target: 'e42', outcome: 'refused' });
+  });
+
+  it('offers click, taking an element reference only, and describes it only when acting on the page is on', async () => {
+    const on = setupClicking(undefined, { actOnPage: true });
+    const click = on.pageTools.offered.find((tool) => tool.name === 'click');
+    expect(click?.inputSchema).toMatchObject({ required: ['element'], additionalProperties: false });
+    expect(Object.keys(click!.inputSchema.properties)).toEqual(['element']);
+    on.conversation.addSelection(selection());
+    on.model.respond(response([text('ok')]));
+    await on.conversation.ask('Where is it?');
+    expect(String(on.model.lastRequest.system)).toMatch(/\bclick\b/);
+
+    const off = setupClicking(scriptedApprover(true).approver, { actOnPage: false });
+    expect(off.pageTools.offered.map((tool) => tool.name)).not.toContain('click');
+    off.conversation.addSelection(selection());
+    const call = pageToolCall('click', { element: 'e1' });
+    off.model.respond([call, ...response([text('ok')])]);
+    await off.conversation.ask('Where is it?');
+    expect(String(off.model.lastRequest.system)).not.toMatch(/\bclick\b/);
+    expect(resultText(await call.result)).toMatch(/not available/);
+    expect(off.clicks).toEqual([]);
   });
 });

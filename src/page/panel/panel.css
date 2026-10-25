@@ -240,6 +240,29 @@
   font-weight: 600;
 }
 
+/* A click or typing waiting for the reader's Allow. */
+.approval {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--subtle);
+}
+
+.approval p {
+  margin: 0 0 8px;
+}
+
+.approval em {
+  font-style: normal;
+  font-weight: 600;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .waiting {
   display: flex;
   align-items: center;

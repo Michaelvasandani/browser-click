@@ -11,7 +11,7 @@ import { MarksLayer } from './marks';
  * left to the model.
  */
 
-export type PageToolName = 'look' | 'mark' | 'scroll_to';
+export type PageToolName = 'look' | 'mark' | 'scroll_to' | 'click';
 
 export interface PageToolDefinition {
   name: PageToolName;
@@ -33,13 +33,24 @@ export interface PageToolResult {
 }
 
 /** The kinds of Page Action. */
-export type PageActionKind = 'scroll';
+export type PageActionKind = 'scroll' | 'click';
 
 /**
- * How a Page Action ended: carried out, or refused by the page tools' rules.
- * (Clicks and typing will add 'denied', for a step the user did not allow.)
+ * How a Page Action ended: carried out, refused by the page tools' rules, or
+ * denied by the user (who did not allow it in the Panel).
  */
-export type PageActionOutcome = 'done' | 'refused';
+export type PageActionOutcome = 'done' | 'refused' | 'denied';
+
+/**
+ * A Page Action waiting for the user's Allow, as the Panel shows it. The page
+ * tools ask only after their own rules let the step through.
+ */
+export interface ApprovalRequest {
+  action: 'click';
+  /** The element's name, as the reader would say it (or its role, if it has no name). */
+  target: string;
+  role: string;
+}
 
 /** An image in a page tool result, in MCP's shape. Only look returns one. */
 export interface PageToolImage {
@@ -76,6 +87,11 @@ export interface PageToolOutcome {
 export interface PageToolCallContext {
   /** The Page Context the Assistant has been sent so far (titles and page text). */
   pageText?: string;
+  /**
+   * Asks the user to allow a click or typing. Resolves true only on Allow.
+   * Without it, every such step is denied.
+   */
+  approve?: (request: ApprovalRequest) => Promise<boolean>;
 }
 
 /** The settings that decide which page tools are offered. */
@@ -124,12 +140,27 @@ const SCROLL_TO: PageToolDefinition = {
   },
 };
 
+const CLICK: PageToolDefinition = {
+  name: 'click',
+  description:
+    'Click a button or link in view, when that is the obvious next step for what the reader asked. Takes an element reference from the latest look; never coordinates. Each click waits for the reader to allow it, and they may say no: if so, carry on without it. Returns the elements in view afterwards.',
+  inputSchema: {
+    type: 'object',
+    properties: { element: { type: 'string', description: 'An element reference from look, such as e3.' } },
+    required: ['element'],
+    additionalProperties: false,
+  },
+};
+
+/** How long a click is given to change the page before the elements in view are listed. */
+const CLICK_SETTLE_MS = 150;
+
 /** The page tools the Assistant is given under these settings. */
 export function offeredPageTools(settings: PageToolSettings): PageToolDefinition[] {
   const tools: PageToolDefinition[] = [];
   if (settings.drawOnPage || settings.actOnPage) tools.push(LOOK);
   if (settings.drawOnPage) tools.push(MARK);
-  if (settings.actOnPage) tools.push(SCROLL_TO);
+  if (settings.actOnPage) tools.push(SCROLL_TO, CLICK);
   return tools;
 }
 
@@ -253,6 +284,22 @@ export function createPageTools(doc: Document, settings: PageToolSettings, optio
       const target = nameOf(element) || roleOf(element);
       return pageAction('scroll', target, 'done', `Scrolled to ${refs.ref(element)} (${describeElement(element)}).`);
     },
+    click: async (input, context) => {
+      const found = clickTarget(doc, refs, input);
+      if ('refusal' in found) return pageAction('click', found.asked, 'refused', found.refusal);
+      const { element } = found;
+      const target = nameOf(element) || roleOf(element);
+      const described = `${refs.ref(element)} (${describeElement(element)})`;
+      const allowed = (await context.approve?.({ action: 'click', target, role: roleOf(element) })) ?? false;
+      if (!allowed) {
+        return pageAction('click', target, 'denied', `The user didn't allow this: ${described} was not clicked. Carry on without it.`);
+      }
+      // The page may have changed while the user decided.
+      if (!element.isConnected) return pageAction('click', target, 'refused', `${described} is no longer on the page.`);
+      (element as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, CLICK_SETTLE_MS));
+      return pageAction('click', target, 'done', `Clicked ${described}.`);
+    },
   };
 
   return {
@@ -351,6 +398,21 @@ function scrollTarget(
     asked,
     refusal: `No element on the page is named exactly ${JSON.stringify(asked)}. Use the name of a heading, link, button, field or label exactly as the Page Context gives it.`,
   };
+}
+
+/**
+ * The element a click call asks for, or why it is refused: one the Assistant
+ * looked up, still listed and in view. The rules run before the user is asked.
+ */
+function clickTarget(doc: Document, refs: Refs, input: Record<string, unknown>): { element: Element } | { refusal: string; asked: string } {
+  const asked = typeof input.element === 'string' ? input.element : 'nothing';
+  const element = refs.element(input.element);
+  if (!element || !isListed(element)) return { asked, refusal: unknownElement(input.element) };
+  const view = doc.defaultView!;
+  if (!inView(element, { width: view.innerWidth, height: view.innerHeight })) {
+    return { asked, refusal: `${refs.ref(element)} (${describeElement(element)}) is not in view. Only what is in view can be clicked.` };
+  }
+  return { element };
 }
 
 function describeElement(element: Element): string {

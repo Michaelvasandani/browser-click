@@ -1,7 +1,7 @@
 import { Conversation, type ConversationEvent, type ModelClient, type Source } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
-import type { PageActionKind, PageActionOutcome, PageTools } from '@/lib/page-tools';
+import type { ApprovalRequest, PageActionKind, PageActionOutcome, PageTools } from '@/lib/page-tools';
 import type { CapturedImage } from './overlay';
 
 export interface SelectionView {
@@ -43,6 +43,8 @@ export interface PanelState {
   busy: boolean;
   /** A message about the Panel itself, such as lost access to the tab. */
   notice: string | null;
+  /** A click or typing waiting for Allow or Deny, shown in the last answer. */
+  approval: ApprovalRequest | null;
 }
 
 /**
@@ -50,7 +52,11 @@ export interface PanelState {
  * via useSyncExternalStore; the Conversation's events are folded in here.
  */
 export class PanelStore {
-  private state: PanelState = { pending: [], turns: [], busy: false, notice: null };
+  private state: PanelState = { pending: [], turns: [], busy: false, notice: null, approval: null };
+  /** Answers the waiting approval, if any. */
+  private settleApproval: ((allowed: boolean) => void) | null = null;
+  /** Answers running: briefly two, when a new question replaces one waiting for approval. */
+  private running = 0;
   private listeners = new Set<() => void>();
   private selections = new Map<number, SelectionView>();
   private nextTurnId = 1;
@@ -68,6 +74,7 @@ export class PanelStore {
       model: settings.model,
       webSearch: settings.webSearch,
       pageTools,
+      approver: (request, signal) => this.approve(request, signal),
       onEvent: (event) => this.onConversationEvent(event),
     });
     this.addSelection(firstSelection, firstPageContext);
@@ -94,8 +101,40 @@ export class PanelStore {
     this.update({ notice });
   }
 
+  /** Send a question. While a step waits for approval, this denies it and replaces the answer. */
   ask(question: string) {
-    return this.run(() => this.conversation.ask(question));
+    const replacing = this.state.approval !== null;
+    return this.run(() => this.conversation.ask(question), replacing);
+  }
+
+  /** Allow the waiting click or typing. */
+  allow() {
+    this.settleApproval?.(true);
+  }
+
+  /** Deny the waiting click or typing. */
+  deny() {
+    this.settleApproval?.(false);
+  }
+
+  /** The Conversation's approver: waits for Allow or Deny; a stop or new question denies. */
+  private approve(request: ApprovalRequest, signal: AbortSignal): Promise<boolean> {
+    // Only one step waits at a time; an earlier one still waiting is denied.
+    this.settleApproval?.(false);
+    return new Promise<boolean>((resolve) => {
+      const settle = (allowed: boolean) => {
+        if (this.settleApproval !== settle) return;
+        this.settleApproval = null;
+        signal.removeEventListener('abort', onAbort);
+        this.update({ approval: null });
+        resolve(allowed);
+      };
+      const onAbort = () => settle(false);
+      this.settleApproval = settle;
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.update({ approval: request });
+      if (signal.aborted) settle(false);
+    });
   }
 
   explain() {
@@ -113,8 +152,9 @@ export class PanelStore {
     return this.run(() => this.conversation.retry());
   }
 
-  private async run(action: () => Promise<void>) {
-    if (this.state.busy) return;
+  private async run(action: () => Promise<void>, replacing = false) {
+    if (this.state.busy && !replacing) return;
+    this.running++;
     this.update({ busy: true });
     try {
       await action();
@@ -122,7 +162,8 @@ export class PanelStore {
       // The Conversation reports model failures as events; this is a last resort.
       this.updateLastTurn({ status: 'error', error: error instanceof Error ? error.message : String(error), searching: false });
     } finally {
-      this.update({ busy: false });
+      this.running--;
+      if (this.running === 0) this.update({ busy: false });
     }
   }
 

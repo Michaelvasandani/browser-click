@@ -203,8 +203,9 @@ export function Options() {
             <span>
               <strong>Act on the page</strong>
               <small className="hint">
-                Claude can scroll the page to the part it is telling you about. Each step shows as a line in the
-                answer. Claude only scrolls to things it already knows are on the page, and never submits forms,
+                Claude can scroll the page to the part it is telling you about, and click a button or link when
+                that is the obvious next step. Every click waits for you to allow it in the Panel. Each step shows as
+                a line in the answer. Claude only scrolls to things it already knows are on the page, and never submits forms,
                 types passwords or leaves the page. Works with Claude Code only for now.
               </small>
             </span>
