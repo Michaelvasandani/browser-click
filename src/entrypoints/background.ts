@@ -49,7 +49,13 @@ async function onActionClicked(tab: Browser.tabs.Tab) {
   const message: BackgroundToPageMessage = {
     type: 'begin-selection',
     fresh: true,
-    settings: { backend: settings.backend, model: settings.model, webSearch: settings.webSearch },
+    settings: {
+      backend: settings.backend,
+      model: settings.model,
+      webSearch: settings.webSearch,
+      drawOnPage: settings.drawOnPage,
+      actOnPage: settings.actOnPage,
+    },
   };
   try {
     await browser.tabs.sendMessage(tab.id, message);

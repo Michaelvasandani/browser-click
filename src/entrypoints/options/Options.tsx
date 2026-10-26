@@ -177,6 +177,42 @@ export function Options() {
           </label>
         </section>
 
+        <section>
+          <span className="label">On the page</span>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.drawOnPage}
+              onChange={(e) => update({ drawOnPage: e.target.checked })}
+            />
+            <span>
+              <strong>Draw on the page</strong>
+              <small className="hint">
+                Claude can draw a box around the part of the page it is telling you about, so you don't have to find
+                it yourself. Drawing changes nothing on the page, and the boxes go away with your next question.
+                Works with Claude Code only for now.
+              </small>
+            </span>
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={settings.actOnPage}
+              onChange={(e) => update({ actOnPage: e.target.checked })}
+            />
+            <span>
+              <strong>Act on the page</strong>
+              <small className="hint">
+                Claude can scroll the page to the part it is telling you about, and click a button or link or type
+                into a field (such as a search box) when that is the obvious next step. Every click and every typing
+                waits for you to allow it in the Panel, which shows the exact text first. Each step shows as
+                a line in the answer. Claude only scrolls to things it already knows are on the page, and never submits forms,
+                types passwords or leaves the page. Works with Claude Code only for now.
+              </small>
+            </span>
+          </label>
+        </section>
+
         <div className="actions">
           <button type="submit">Save</button>
           {saved && (

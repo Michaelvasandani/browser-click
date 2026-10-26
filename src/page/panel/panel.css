@@ -233,6 +233,56 @@
   font-size: 13px;
 }
 
+/* One line per thing the Assistant did on the page ("Marked Notifications"). */
+.page-step em {
+  color: var(--fg);
+  font-style: normal;
+  font-weight: 600;
+}
+
+/* A click or typing waiting for the reader's Allow. */
+.approval {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--subtle);
+}
+
+.approval p {
+  margin: 0 0 8px;
+}
+
+.approval .approval-note {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.approval em {
+  font-style: normal;
+  font-weight: 600;
+}
+
+/*
+ * Text the Assistant types, shown exactly: every space and line break kept,
+ * long words wrapped rather than cut, never shortened.
+ */
+.typed-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95em;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--subtle);
+  border: 1px solid var(--border);
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .waiting {
   display: flex;
   align-items: center;

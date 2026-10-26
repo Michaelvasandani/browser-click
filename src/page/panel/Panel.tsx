@@ -11,7 +11,8 @@ import {
 import { browser } from 'wxt/browser';
 import type { PageToBackgroundMessage } from '@/lib/messages';
 import { MAX_PAGE_TEXT_CHARS } from '@/lib/page-context';
-import type { PanelStore, SelectionView, TurnView } from '../store';
+import type { ApprovalRequest, PageActionKind, PageActionOutcome } from '@/lib/page-tools';
+import type { PageStep, PanelStore, SelectionView, TurnView } from '../store';
 import { Answer } from './Answer';
 
 export interface PanelProps {
@@ -49,7 +50,8 @@ export function Panel({ store, onClose, onAddSelection }: PanelProps) {
   const submit = (event?: FormEvent) => {
     event?.preventDefault();
     const text = question.trim();
-    if (!text || state.busy) return;
+    // While a step waits for approval, a new question denies it and replaces the answer.
+    if (!text || (state.busy && !state.approval)) return;
     setQuestion('');
     void store.ask(text);
   };
@@ -82,6 +84,9 @@ export function Panel({ store, onClose, onAddSelection }: PanelProps) {
             key={turn.id}
             turn={turn}
             onRetry={index === state.turns.length - 1 && !state.busy ? () => void store.retry() : undefined}
+            approval={index === state.turns.length - 1 ? state.approval : null}
+            onAllow={() => store.allow()}
+            onDeny={() => store.deny()}
           />
         ))}
         {state.pending.length > 0 && (
@@ -122,7 +127,7 @@ export function Panel({ store, onClose, onAddSelection }: PanelProps) {
             </button>
           )}
           <span className="spacer" />
-          {state.busy ? (
+          {state.busy && !(state.approval && question.trim()) ? (
             <button type="button" className="secondary stop" onClick={() => store.stop()}>
               Stop
             </button>
@@ -156,14 +161,124 @@ function openOptions() {
   void browser.runtime.sendMessage(message).catch(() => {});
 }
 
+/** One line for a Mark: "Marked *Save*", "Pointed at an area of the page", "Labelled *Save* 2". */
+function MarkStep({ step }: { step: Extract<PageStep, { kind: 'mark' }> }) {
+  const target = step.target ? <em>{step.target}</em> : 'an area of the page';
+  switch (step.mark) {
+    case 'arrow':
+      return <>Pointed at {target}</>;
+    case 'highlight':
+      return <>Highlighted {target}</>;
+    case 'label':
+      return (
+        <>
+          Labelled {target} {step.number}
+        </>
+      );
+    default:
+      return <>Marked {target}</>;
+  }
+}
+
+/** How each Page Action reads in its line, by outcome: "Scrolled to Billing", "Didn't scroll to Billing". */
+const PAGE_ACTION_WORDS: Record<PageActionKind, Record<PageActionOutcome, string>> = {
+  scroll: { done: 'Scrolled to', refused: "Didn't scroll to", denied: "Didn't scroll to" },
+  click: { done: 'Clicked', refused: "Didn't click", denied: "Didn't click" },
+  type: { done: 'Typed', refused: "Didn't type", denied: "Didn't type" },
+};
+
+/** One Page Action line: "Clicked *Settings*", or "Typed *refunds* into *Search help*". */
+function PageActionStep({ step }: { step: Extract<PageStep, { kind: 'page-action' }> }) {
+  const words = PAGE_ACTION_WORDS[step.action][step.outcome];
+  if (step.action === 'type' && step.text !== undefined) {
+    return (
+      <>
+        {words} <em className="typed-text">{step.text}</em> into <em>{step.target}</em>
+      </>
+    );
+  }
+  return (
+    <>
+      {words} <em>{step.target}</em>
+    </>
+  );
+}
+
+/**
+ * What the Allow prompt asks, naming the element: "Click the button Settings?",
+ * or, with the exact text that will be typed (never shortened), "Type *refunds*
+ * into the searchbox Search help?"
+ */
+function approvalWords(request: ApprovalRequest) {
+  switch (request.action) {
+    case 'click':
+      return (
+        <>
+          Click the {request.role} <em>{request.target}</em>?
+        </>
+      );
+    case 'type':
+      return (
+        <>
+          Type <span className="typed-text">{request.text}</span> into the {request.role} <em>{request.target}</em>?
+        </>
+      );
+  }
+}
+
+/**
+ * The Allow / Deny prompt. It never takes keyboard focus: the reader may be
+ * typing a question, and a keystroke meant for it must never allow a step.
+ */
+function Approval({ request, onAllow, onDeny }: { request: ApprovalRequest; onAllow: () => void; onDeny: () => void }) {
+  return (
+    <div className="approval" role="group" aria-label="Allow this step?">
+      <p>{approvalWords(request)}</p>
+      {request.action === 'click' && request.role === 'link' && (
+        <p className="approval-note">If the page doesn't handle this link itself and it would load another page, browser-click cancels it.</p>
+      )}
+      <div className="approval-actions">
+        <button type="button" className="primary" onClick={onAllow}>
+          Allow
+        </button>
+        <button type="button" className="secondary" onClick={onDeny}>
+          Deny
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Memoised: while an answer streams, only the turn that changed re-renders.
-const Turn = memo(function Turn({ turn, onRetry }: { turn: TurnView; onRetry?: () => void }) {
+const Turn = memo(function Turn({
+  turn,
+  onRetry,
+  approval,
+  onAllow,
+  onDeny,
+}: {
+  turn: TurnView;
+  onRetry?: () => void;
+  approval: ApprovalRequest | null;
+  onAllow: () => void;
+  onDeny: () => void;
+}) {
   const sources = webSources(turn);
   return (
     <article className="turn" data-status={turn.status}>
       {turn.selections.length > 0 && <Thumbnails selections={turn.selections} />}
       <p className="user-question">{turn.question}</p>
       {turn.answer && <Answer text={turn.answer} />}
+      {turn.steps.map((step, index) => (
+        <p key={index} className="status page-step" data-outcome={step.kind === 'page-action' ? step.outcome : undefined}>
+          {step.kind === 'mark' ? (
+            <MarkStep step={step} />
+          ) : (
+            <PageActionStep step={step} />
+          )}
+        </p>
+      ))}
+      {approval && <Approval request={approval} onAllow={onAllow} onDeny={onDeny} />}
       {(turn.searching || turn.status === 'waiting') && (
         <p className="status waiting" role="status">
           <span className="dots" aria-hidden="true">

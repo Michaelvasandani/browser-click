@@ -1,6 +1,8 @@
 import { Conversation, type ConversationEvent, type ModelClient, type Source } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
+import type { MarkKind, ViewportRect } from '@/lib/marks';
+import type { ApprovalRequest, PageActionKind, PageActionOutcome, PageTools } from '@/lib/page-tools';
 import type { CapturedImage } from './overlay';
 
 export interface SelectionView {
@@ -9,6 +11,19 @@ export interface SelectionView {
   /** The page text sent with this Selection was cut off for length. */
   pageTextTruncated: boolean;
 }
+
+/** Something the Assistant did on the page during an answer, shown as one line in it. */
+export type PageStep =
+  | {
+      kind: 'mark';
+      mark: MarkKind;
+      /** The element's name; absent for a Mark at an area of the page. */
+      target?: string;
+      /** A label's number. */
+      number?: number;
+    }
+  /** `text` is what typing put, or would have put, in the field. */
+  | { kind: 'page-action'; action: PageActionKind; target: string; text?: string; outcome: PageActionOutcome };
 
 export type TurnStatus = 'waiting' | 'streaming' | 'done' | 'stopped' | 'error' | 'refused';
 
@@ -21,6 +36,8 @@ export interface TurnView {
   /** A web search is running. */
   searching: boolean;
   sources: Source[];
+  /** Marks drawn and Page Actions taken or refused during this answer, in order. */
+  steps: PageStep[];
   /** Why the turn failed or was declined, in plain words. */
   error?: string;
   /** The failure is about settings the user can change in options. */
@@ -35,6 +52,8 @@ export interface PanelState {
   busy: boolean;
   /** A message about the Panel itself, such as lost access to the tab. */
   notice: string | null;
+  /** A click or typing waiting for Allow or Deny, shown in the last answer. */
+  approval: ApprovalRequest | null;
 }
 
 /**
@@ -42,7 +61,11 @@ export interface PanelState {
  * via useSyncExternalStore; the Conversation's events are folded in here.
  */
 export class PanelStore {
-  private state: PanelState = { pending: [], turns: [], busy: false, notice: null };
+  private state: PanelState = { pending: [], turns: [], busy: false, notice: null, approval: null };
+  /** Answers the waiting approval, if any. */
+  private settleApproval: ((allowed: boolean) => void) | null = null;
+  /** Answers running: briefly two, when a new question replaces one waiting for approval. */
+  private running = 0;
   private listeners = new Set<() => void>();
   private selections = new Map<number, SelectionView>();
   private nextTurnId = 1;
@@ -53,11 +76,16 @@ export class PanelStore {
     firstPageContext: PageContext,
     settings: PageSettings,
     client: ModelClient,
+    pageTools?: PageTools,
+    /** Told where each Mark's target is in the viewport, so the Panel can move out of its way. */
+    private readonly onMarkDrawn?: (area: ViewportRect) => void,
   ) {
     this.conversation = new Conversation({
       client,
       model: settings.model,
       webSearch: settings.webSearch,
+      pageTools,
+      approver: (request, signal) => this.approve(request, signal),
       onEvent: (event) => this.onConversationEvent(event),
     });
     this.addSelection(firstSelection, firstPageContext);
@@ -84,8 +112,40 @@ export class PanelStore {
     this.update({ notice });
   }
 
+  /** Send a question. While a step waits for approval, this denies it and replaces the answer. */
   ask(question: string) {
-    return this.run(() => this.conversation.ask(question));
+    const replacing = this.state.approval !== null;
+    return this.run(() => this.conversation.ask(question), replacing);
+  }
+
+  /** Allow the waiting click or typing. */
+  allow() {
+    this.settleApproval?.(true);
+  }
+
+  /** Deny the waiting click or typing. */
+  deny() {
+    this.settleApproval?.(false);
+  }
+
+  /** The Conversation's approver: waits for Allow or Deny; a stop or new question denies. */
+  private approve(request: ApprovalRequest, signal: AbortSignal): Promise<boolean> {
+    // Only one step waits at a time; an earlier one still waiting is denied.
+    this.settleApproval?.(false);
+    return new Promise<boolean>((resolve) => {
+      const settle = (allowed: boolean) => {
+        if (this.settleApproval !== settle) return;
+        this.settleApproval = null;
+        signal.removeEventListener('abort', onAbort);
+        this.update({ approval: null });
+        resolve(allowed);
+      };
+      const onAbort = () => settle(false);
+      this.settleApproval = settle;
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.update({ approval: request });
+      if (signal.aborted) settle(false);
+    });
   }
 
   explain() {
@@ -103,8 +163,9 @@ export class PanelStore {
     return this.run(() => this.conversation.retry());
   }
 
-  private async run(action: () => Promise<void>) {
-    if (this.state.busy) return;
+  private async run(action: () => Promise<void>, replacing = false) {
+    if (this.state.busy && !replacing) return;
+    this.running++;
     this.update({ busy: true });
     try {
       await action();
@@ -112,7 +173,8 @@ export class PanelStore {
       // The Conversation reports model failures as events; this is a last resort.
       this.updateLastTurn({ status: 'error', error: error instanceof Error ? error.message : String(error), searching: false });
     } finally {
-      this.update({ busy: false });
+      this.running--;
+      if (this.running === 0) this.update({ busy: false });
     }
   }
 
@@ -128,6 +190,7 @@ export class PanelStore {
           status: 'waiting',
           searching: false,
           sources: [],
+          steps: [],
         };
         this.update({
           turns: [...this.state.turns, turn],
@@ -146,6 +209,21 @@ export class PanelStore {
       case 'sources':
         this.updateLastTurn({ sources: event.sources });
         break;
+      case 'mark': {
+        const turn = this.state.turns.at(-1);
+        if (turn) {
+          const step: PageStep = { kind: 'mark', mark: event.kind, target: event.target, number: event.number };
+          this.updateLastTurn({ steps: [...turn.steps, step] });
+        }
+        this.onMarkDrawn?.(event.area);
+        break;
+      }
+      case 'page-action': {
+        const turn = this.state.turns.at(-1);
+        const { action, target, text, outcome } = event;
+        if (turn) this.updateLastTurn({ steps: [...turn.steps, { kind: 'page-action', action, target, text, outcome }] });
+        break;
+      }
       case 'error':
         this.updateLastTurn({
           status: 'error',

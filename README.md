@@ -40,6 +40,7 @@ The options page also has:
 
 - **Model**: Claude Opus 5.5 (the default, best answers), Claude Sonnet 5.5 (faster and cheaper) or Claude Haiku 5.5 (fastest and cheapest).
 - **Web search**: on by default. Turn it off to cap cost and latency.
+- **Draw on the page** and **Act on the page**: whether Claude may draw Marks on the page (on by default) and take Page Actions on it (off by default). See [Drawing on and acting on the page](#drawing-on-and-acting-on-the-page). Both work with Claude Code only for now.
 
 Settings are kept in Chrome's local extension storage on this computer. They are not synced, and the code browser-click injects into web pages cannot read them.
 
@@ -59,7 +60,7 @@ If you have Claude Code, browser-click can answer through it. Answers then count
 
 Each open Panel runs one `claude` process. It starts as soon as you make a Selection, so it is usually ready by the time you have typed your question, and follow-ups reuse it. The process ends when you close the Panel. Conversations are saved in `~/browser-click-threads` (pass `--threads-dir` to choose another folder). To pick one up in Claude Code, run `claude --resume` in that folder.
 
-The helper runs Claude Code with browser-click's own instructions, with web search as its only tool (none when web search is off), and without your Claude Code settings, hooks, CLAUDE.md files or MCP servers. Web search uses Claude Code's own search, so answers on this backend don't list source links.
+The helper runs Claude Code with browser-click's own instructions, in its own folder, and without your Claude Code settings, hooks, CLAUDE.md files, slash commands, Chrome integration or MCP servers. Its only tools are web search (when it is on) and browser-click's page tools (when "Draw on the page" or "Act on the page" is on), which the helper serves to `claude` itself as its one MCP server. With all three off, `claude` gets no tools at all. Web search uses Claude Code's own search, so answers on this backend don't list source links.
 
 ## Using it
 
@@ -71,6 +72,33 @@ The helper runs Claude Code with browser-click's own instructions, with web sear
 - **Move or close**: drag the Panel by its header. Close it with **×** or `Esc`.
 - **Start over**: click the toolbar icon again while a Panel is open. A new Selection replaces the current Conversation. Press `Esc` instead of selecting to keep the old one.
 
+## Drawing on and acting on the page
+
+On the Claude Code backend, Claude can show you where things are and, if you let it, do the obvious next step for you. It decides on its own when that helps with what you asked, and it works only within the part of the page in view. The API key backend doesn't offer this yet and answers in words only.
+
+**Marks.** Claude can draw a box, an arrow, a highlight or a numbered label over the page, so "click the third toggle under Billing" comes with a box around that toggle, and a sequence of steps comes with labels 1, 2, 3. A Mark points at an element of the page, or at an area of it when there is no element to point at (a spike in a chart, a point in a video frame). Marks change nothing on the page: clicks and scrolling go straight through them, and they stay on what they point at as the page scrolls or reflows. If a Mark would land under the Panel, the Panel moves aside, staying inside the window. Marks hide while you are in Selection Mode, so they are never in a new Selection, and come back afterwards. They disappear when you ask your next question or close the Panel.
+
+**Page Actions.** Claude can:
+
+- **Scroll** to something on the page, without asking. It only scrolls to things it already knows are there from the Page Context, so it can't search the page by scrolling around.
+- **Click** a button or link in view, and **type** into a field in view (a search or filter box, say). Each click and each bit of typing waits in the answer for you to click **Allow**. The prompt names the element, and for typing shows the exact text and the field it goes into; new text needs a new **Allow**. **Deny** skips that step and Claude carries on without it. Asking a new question or clicking **Stop** while a prompt is showing counts as **Deny**, and a prompt you leave alone never goes through on its own. Typing replaces what the field holds and never presses `Enter`.
+
+Some things are never allowed, whatever the page says and whether or not you would click **Allow**. Claude can't:
+
+- type into password fields or payment fields (card number, expiry date, security code and similar)
+- click anything that submits a form
+- click a link that leads to another site, opens a new tab or downloads a file. A link to another page of the same site waits for **Allow** like any click, because single-page apps (GitHub, say) handle those links themselves without loading a page; if the page doesn't handle it and it would load another page, browser-click cancels it, and the prompt says so. Links within the page are fine.
+- reach inside content embedded from other sites, such as videos, payment forms and widgets (it can still put a Mark around one as a whole)
+- touch the Panel, so it can never click its own **Allow**
+
+These refusals go back to Claude with the reason, and Claude doesn't ask you first. While a click or typing is running, and for two seconds after it, the page also asks Chrome to confirm before it unloads, so a click that navigates by script (even a moment later) brings up Chrome's "Leave site?" dialog and you can cancel it.
+
+Every Mark and Page Action shows as one line in the answer: "Marked *Save*", "Scrolled to *Billing*", "Clicked *Settings*", "Typed *refunds* into *Search*", and for steps that didn't happen "Didn't click *Delete*". The Panel always shows what was done to the page.
+
+To work in steps, Claude reads the elements in view (their role, name or short text, and whether they are a password, payment or submit control) after each step, and can ask for an image of the visible page when it needs to see it, for example a chart. Marks are left out of that image.
+
+Two switches on the options page control this. **Draw on the page** is on by default; **Act on the page** is off by default, and turning it on never skips an **Allow**. Claude is told which of the two it may do. With both off, browser-click behaves as if this feature didn't exist. Changes apply from the next Conversation.
+
 ## What leaves your machine
 
 When you ask a question, browser-click sends a request **directly from your browser to Anthropic's API** (`api.anthropic.com`), authenticated with your API key. The request contains:
@@ -81,7 +109,7 @@ When you ask a question, browser-click sends a request **directly from your brow
 
 When web search is on, Claude may also send search queries it writes itself. Anthropic runs those searches.
 
-With the Claude Code backend, the same request goes to the local helper instead, which hands it to `claude` on your machine. Claude Code sends it to Anthropic under your Claude Code account and saves the Conversation in its session files.
+With the Claude Code backend, the same request goes to the local helper instead, which hands it to `claude` on your machine. Claude Code sends it to Anthropic under your Claude Code account and saves the Conversation in its session files. When "Draw on the page" or "Act on the page" is on, the answer can also send Anthropic the elements in view (each one's role and name or short text) and, when Claude asks for one, an image of the visible page, both read at the moment Claude asks.
 
 Nothing is sent before you ask a question or click **Explain this**. Nothing goes anywhere else: there is no browser-click server, no analytics and no telemetry. With the API key backend, Conversations are kept only in the open page's memory and are discarded when you close the Panel or reload the page, and only your settings are saved.
 
@@ -105,6 +133,8 @@ What Anthropic does with API requests is governed by your agreement with Anthrop
 - **Access lapses on navigation.** If the tab navigates to another page while a Panel is open, **Add selection** asks you to click the toolbar icon again.
 - **Web search costs extra.** Anthropic bills each search ($10 per 1,000 searches at the time of writing) on top of token costs, with at most 3 searches per answer. Your organization's admin may also need to enable web search in the Anthropic Console. If the API rejects it, the Panel says so. You can turn it off in the options.
 - **Math is not rendered.** Claude is asked to write math in plain text or Unicode.
+- **Marks and Page Actions need Claude Code.** The API key backend doesn't offer them yet.
+- **Page Actions stay on this page.** Claude only scrolls, clicks and types; it doesn't drag, hover, press shortcuts or upload files, and a Conversation doesn't survive the page navigating away.
 
 ## Development
 
@@ -123,6 +153,8 @@ The code lives in `src/`:
 | `entrypoints/page.ts` | Page code, injected on toolbar click. `page/controller.ts` wires Selection Mode (`page/overlay.ts`) to the Panel (`page/panel-host.tsx`, `page/panel/`). |
 | `entrypoints/options/` | The options page. |
 | `lib/conversation.ts` | The Conversation: builds each request, consumes the streamed response and emits the events the Panel renders. Its model client is passed in. |
+| `lib/page-tools.ts` | The page tools (*look*, *mark*, *scroll_to*, *click*, *type*), defined once for every Backend. Enforces what is never allowed, in page code. |
+| `lib/marks.ts` | The Marks layer drawn above the page. |
 | `lib/geometry.ts` | Turns a drawn rectangle into the crop of the captured image. |
 | `lib/page-context.ts` | Extracts title, URL and readable text from the page. |
 

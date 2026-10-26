@@ -2,7 +2,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ModelClient } from '@/lib/conversation';
 import type { PageSettings } from '@/lib/messages';
 import type { PageContext } from '@/lib/page-context';
-import { clampPanel, placePanel, type Position } from '@/lib/placement';
+import type { PageTools } from '@/lib/page-tools';
+import type { ViewportRect } from '@/lib/marks';
+import { clampPanel, moveAside, placePanel, type Position } from '@/lib/placement';
 import type { CapturedImage } from './overlay';
 import { Panel } from './panel/Panel';
 import panelCss from './panel/panel.css?inline';
@@ -41,9 +43,10 @@ export class PanelHost {
     pageContext: PageContext,
     settings: PageSettings,
     client: ModelClient,
+    pageTools: PageTools | undefined,
     callbacks: PanelCallbacks,
   ) {
-    this.store = new PanelStore(firstSelection, pageContext, settings, client);
+    this.store = new PanelStore(firstSelection, pageContext, settings, client, pageTools, (area) => this.moveAsideFrom(area));
     this.host = document.createElement('browser-click-panel');
     // Closed, so the page's own scripts cannot read the Conversation out of the DOM.
     const shadow = this.host.attachShadow({ mode: 'closed' });
@@ -86,6 +89,14 @@ export class PanelHost {
     this.frame.style.left = `${this.position.left}px`;
     this.frame.style.top = `${this.position.top}px`;
     this.frame.style.maxHeight = `${Math.max(200, viewport.height - this.position.top - VIEWPORT_MARGIN)}px`;
+  }
+
+  /** Move out of the way of what a Mark points at, so the user can see it. */
+  private moveAsideFrom(area: ViewportRect) {
+    if (!this.visible) return;
+    const viewport = { width: window.innerWidth, height: window.innerHeight - VIEWPORT_MARGIN };
+    const size = { width: this.frame.offsetWidth || PANEL_WIDTH, height: this.frame.offsetHeight };
+    this.moveTo(moveAside(this.position, size, area, viewport));
   }
 
   private startDrag(event: PointerEvent) {

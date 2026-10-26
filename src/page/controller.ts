@@ -7,6 +7,8 @@ import type {
 } from '@/lib/messages';
 import type { ModelClient } from '@/lib/conversation';
 import { extractPageContext } from '@/lib/page-context';
+import { createPageTools, MAX_IMAGE_DATA_CHARS, type PageTools } from '@/lib/page-tools';
+import { shrinkStill } from './look-image';
 import { openClaudeCodeClient, type ClaudeCodeClient } from './claude-code-port';
 import { portModelClient } from './model-port';
 import { runSelectionMode } from './overlay';
@@ -20,6 +22,8 @@ export function startPage() {
   let panel: PanelHost | null = null;
   // The Claude Code backend's client lives as long as its Panel.
   let claudeCode: ClaudeCodeClient | null = null;
+  // So do the page tools, and the Marks they drew.
+  let pageTools: PageTools | null = null;
   let selecting = false;
   // Set when "Add selection" could not capture the tab. The next toolbar click
   // (which restores access) then adds to this Conversation instead of replacing it.
@@ -31,11 +35,25 @@ export function startPage() {
     void beginSelection(fresh, message.settings);
   });
 
+  /** An image of the visible page for look, taken the way Selection Mode takes its still. */
+  async function captureForLook(): Promise<CaptureResponse> {
+    // Selection Mode hides the Panel and covers the page with its own still.
+    if (selecting) return { ok: false, error: 'The reader is making a Selection (Selection Mode is showing).' };
+    // Let the page tools' hiding of the Marks reach the screen first.
+    await nextFrames(2);
+    if (selecting) return { ok: false, error: 'The reader is making a Selection (Selection Mode is showing).' };
+    const capture = await requestCapture();
+    if (!capture.ok) return capture;
+    return shrinkStill(capture.dataUrl, window.innerWidth, MAX_IMAGE_DATA_CHARS);
+  }
+
   function closePanel() {
     panel?.destroy();
     panel = null;
     claudeCode?.close();
     claudeCode = null;
+    pageTools?.dispose();
+    pageTools = null;
     resumeAfterAccessLost = false;
   }
 
@@ -50,6 +68,9 @@ export function startPage() {
     const restorePanel = () => {
       if (panelWasVisible) panel?.show();
     };
+    // Keep the Marks out of the still, and out of the way while selecting.
+    const marksOwner = pageTools;
+    marksOwner?.setMarksHidden(true);
     try {
       await runSelection(fresh, settings, panelWasVisible, restorePanel);
     } catch (error) {
@@ -58,6 +79,8 @@ export function startPage() {
       panel?.store.setNotice(`Couldn't make that Selection: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       selecting = false;
+      // Back after a finished or cancelled Selection. (A fresh Conversation disposed them instead.)
+      marksOwner?.setMarksHidden(false);
     }
   }
 
@@ -67,9 +90,9 @@ export function startPage() {
     panelWasVisible: boolean,
     restorePanel: () => void,
   ) {
-    if (panelWasVisible) {
-      // Keep the Panel out of the still.
-      panel!.hide();
+    if (panelWasVisible || pageTools) {
+      // Keep the Panel and the Marks out of the still.
+      panel?.hide();
       await nextFrames(2);
     }
     const capture = await requestCapture();
@@ -94,8 +117,16 @@ export function startPage() {
       if (!settings) return;
       closePanel();
       let client: ModelClient = portModelClient;
-      if (settings.backend === 'claude-code') client = claudeCode = openClaudeCodeClient(settings, pageContext.title);
-      panel = new PanelHost(image, pageContext, settings, client, {
+      if (settings.backend === 'claude-code') {
+        client = claudeCode = openClaudeCodeClient(settings, pageContext.title);
+        // Only Claude Code is given page tools for now; the API key backend gets none.
+        pageTools = createPageTools(
+          document,
+          { drawOnPage: settings.drawOnPage, actOnPage: settings.actOnPage },
+          { capture: captureForLook },
+        );
+      }
+      panel = new PanelHost(image, pageContext, settings, client, pageTools ?? undefined, {
         onClose: closePanel,
         onAddSelection: addSelection,
       });

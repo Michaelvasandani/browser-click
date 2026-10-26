@@ -1,5 +1,6 @@
 /** Messages exchanged between the Background and the page code it injects. */
-import type { ModelErrorKind, ModelStreamItem, StreamParams } from './conversation';
+import type { ModelErrorKind, ModelResponseItem, StreamParams } from './conversation';
+import type { PageToolCall, PageToolResult } from './page-tools';
 import type { Backend, ModelId } from './settings';
 
 /** Settings the page code needs. The API key never leaves the Background. */
@@ -7,6 +8,8 @@ export interface PageSettings {
   backend: Backend;
   model: ModelId;
   webSearch: boolean;
+  drawOnPage: boolean;
+  actOnPage: boolean;
 }
 
 /** Background → page: the user clicked the toolbar icon. */
@@ -53,7 +56,7 @@ export interface ModelPortRequest {
 
 /** Background → page over the model port. */
 export type ModelPortMessage =
-  | { type: 'item'; item: ModelStreamItem }
+  | { type: 'item'; item: ModelResponseItem }
   | { type: 'error'; kind: ModelErrorKind; message: string }
   | { type: 'end' };
 
@@ -66,13 +69,27 @@ export const CLAUDE_CODE_PORT = 'claude-code';
 /** Page → Background over the Claude Code port. */
 export type ClaudeCodePortRequest =
   /** First message: start claude for this Conversation (or resume its saved session). */
-  | { type: 'open'; model: ModelId; webSearch: boolean; title: string; sessionId?: string }
+  | {
+      type: 'open';
+      model: ModelId;
+      webSearch: boolean;
+      drawOnPage: boolean;
+      actOnPage: boolean;
+      title: string;
+      sessionId?: string;
+    }
   /** Send the newest user message; claude keeps the history itself. */
   | { type: 'ask'; content: ClaudeCodeUserContent }
   /** Interrupt the answer being generated. */
-  | { type: 'stop' };
+  | { type: 'stop' }
+  /** The result of the page tool call with this ID. */
+  | { type: 'page-tool-result'; callId: string; result: PageToolResult };
 
 export type ClaudeCodeUserContent = Exclude<StreamParams['messages'][number]['content'], string>;
 
 /** Background → page over the Claude Code port: the current answer's stream, plus the session's ID. */
-export type ClaudeCodePortMessage = ModelPortMessage | { type: 'session'; sessionId: string };
+export type ClaudeCodePortMessage =
+  | ModelPortMessage
+  | { type: 'session'; sessionId: string }
+  /** claude called a page tool during the current answer; answer with a page-tool-result for `callId`. */
+  | { type: 'page-tool-call'; callId: string; call: PageToolCall };
